@@ -11,6 +11,7 @@ import AgentCreate from './pages/AgentCreate';
 import Chat from './pages/Chat';
 import Messages from './pages/Messages';
 import EnterpriseSettings from './pages/EnterpriseSettings';
+import InvitationCodes from './pages/InvitationCodes';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const token = useAuthStore((s) => s.token);
@@ -56,6 +57,7 @@ export default function App() {
                 <Route path="agents/:id/chat" element={<Chat />} />
                 <Route path="messages" element={<Messages />} />
                 <Route path="enterprise" element={<EnterpriseSettings />} />
+                <Route path="invitations" element={<InvitationCodes />} />
             </Route>
         </Routes>
     );

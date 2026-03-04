@@ -109,7 +109,8 @@ Cada agente tiene un sistema de archivos completo: documentos, código, datos, p
 ```bash
 git clone https://github.com/dataelement/Clawith.git
 cd Clawith
-bash setup.sh     # Configuración automática de PostgreSQL + dependencias + inicialización de BD
+bash setup.sh             # Producción: solo dependencias de ejecución (~1 min)
+# bash setup.sh --dev     # Desarrollo: incluye pytest y herramientas de prueba (~3 min)
 bash restart.sh   # Inicia los servicios
 # → http://localhost:3008
 ```

@@ -109,7 +109,8 @@ Clawith は、オープンソースのマルチエージェントコラボレー
 ```bash
 git clone https://github.com/dataelement/Clawith.git
 cd Clawith
-bash setup.sh     # PostgreSQL自動セットアップ + 依存関係 + DB初期化
+bash setup.sh             # 本番: ランタイム依存のみ（約1分）
+# bash setup.sh --dev     # 開発: pytest等テストツールも含む（約3分）
 bash restart.sh   # サービス起動
 # → http://localhost:3008
 ```

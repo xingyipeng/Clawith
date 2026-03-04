@@ -261,6 +261,12 @@ export default function Layout() {
                             {t('nav.enterprise')}
                         </NavLink>
                     )}
+                    {user && user.role === 'platform_admin' && (
+                        <NavLink to="/invitations" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                            <span className="sidebar-item-icon" style={{ display: 'flex' }}>🎟️</span>
+                            {t('nav.invitations', 'Invitation Codes')}
+                        </NavLink>
+                    )}
                 </div>
 
                 <div className="sidebar-footer">

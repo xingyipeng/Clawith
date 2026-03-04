@@ -110,7 +110,8 @@ Every agent has a full file system: documents, code, data, plans. Agents read, w
 ```bash
 git clone https://github.com/dataelement/Clawith.git
 cd Clawith
-bash setup.sh
+bash setup.sh         # Production: installs runtime dependencies only (~1 min)
+bash setup.sh --dev   # Development: also installs pytest and test tools (~3 min)
 ```
 
 This will:

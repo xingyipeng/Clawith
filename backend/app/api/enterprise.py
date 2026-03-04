@@ -433,25 +433,46 @@ async def create_invitation_codes(
 
 @router.get("/invitation-codes")
 async def list_invitation_codes(
+    page: int = 1,
+    page_size: int = 20,
+    search: str = "",
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all invitation codes with usage stats."""
+    """List invitation codes with pagination and search."""
+    from sqlalchemy import func as sqla_func
+
+    stmt = select(InvitationCode)
+    count_stmt = select(sqla_func.count()).select_from(InvitationCode)
+
+    if search:
+        stmt = stmt.where(InvitationCode.code.ilike(f"%{search}%"))
+        count_stmt = count_stmt.where(InvitationCode.code.ilike(f"%{search}%"))
+
+    total_result = await db.execute(count_stmt)
+    total = total_result.scalar() or 0
+
+    offset = (max(page, 1) - 1) * page_size
     result = await db.execute(
-        select(InvitationCode).order_by(InvitationCode.created_at.desc())
+        stmt.order_by(InvitationCode.created_at.desc()).offset(offset).limit(page_size)
     )
     codes = result.scalars().all()
-    return [
-        {
-            "id": str(c.id),
-            "code": c.code,
-            "max_uses": c.max_uses,
-            "used_count": c.used_count,
-            "is_active": c.is_active,
-            "created_at": c.created_at.isoformat() if c.created_at else None,
-        }
-        for c in codes
-    ]
+    return {
+        "items": [
+            {
+                "id": str(c.id),
+                "code": c.code,
+                "max_uses": c.max_uses,
+                "used_count": c.used_count,
+                "is_active": c.is_active,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+            for c in codes
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.delete("/invitation-codes/{code_id}")

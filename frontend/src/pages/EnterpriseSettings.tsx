@@ -429,188 +429,10 @@ function CompanyNameEditor() {
 }
 
 
-function InvitationCodesTab() {
-    const { t } = useTranslation();
-    const [enabled, setEnabled] = useState(false);
-    const [codes, setCodes] = useState<any[]>([]);
-    const [batchCount, setBatchCount] = useState(5);
-    const [maxUses, setMaxUses] = useState(5);
-    const [creating, setCreating] = useState(false);
-    const [toast, setToast] = useState('');
-
-    const token = localStorage.getItem('token');
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-
-    const loadSetting = async () => {
-        const res = await fetch('/api/enterprise/system-settings/invitation_code_enabled', { headers });
-        const data = await res.json();
-        setEnabled(data.value?.enabled || false);
-    };
-    const loadCodes = async () => {
-        const res = await fetch('/api/enterprise/invitation-codes', { headers });
-        setCodes(await res.json());
-    };
-    useEffect(() => { loadSetting(); loadCodes(); }, []);
-
-    const toggleEnabled = async () => {
-        const newVal = !enabled;
-        await fetch('/api/enterprise/system-settings/invitation_code_enabled', {
-            method: 'PUT', headers, body: JSON.stringify({ value: { enabled: newVal } }),
-        });
-        setEnabled(newVal);
-    };
-
-    const createBatch = async () => {
-        setCreating(true);
-        await fetch('/api/enterprise/invitation-codes', {
-            method: 'POST', headers, body: JSON.stringify({ count: batchCount, max_uses: maxUses }),
-        });
-        await loadCodes();
-        setCreating(false);
-        setToast(t('common.save', 'Created'));
-        setTimeout(() => setToast(''), 2000);
-    };
-
-    const deactivate = async (id: string) => {
-        await fetch(`/api/enterprise/invitation-codes/${id}`, { method: 'DELETE', headers });
-        await loadCodes();
-    };
-
-    return (
-        <div>
-            {toast && (
-                <div style={{
-                    position: 'fixed', top: '20px', right: '20px', padding: '10px 20px',
-                    borderRadius: '8px', background: 'var(--success)', color: '#fff',
-                    fontSize: '13px', zIndex: 9999,
-                }}>{toast}</div>
-            )}
-
-            {/* Toggle */}
-            <div className="card" style={{ padding: '16px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                    <div style={{ fontWeight: 600, fontSize: '14px' }}>
-                        {t('enterprise.invites.enableLabel', 'Require Invitation Code for Registration')}
-                    </div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                        {t('enterprise.invites.enableDesc', 'When enabled, new users must provide a valid invitation code to register.')}
-                    </div>
-                </div>
-                <div
-                    onClick={toggleEnabled}
-                    style={{
-                        width: '44px', height: '24px', borderRadius: '12px', cursor: 'pointer',
-                        background: enabled ? 'var(--accent-color)' : 'var(--border-subtle)',
-                        position: 'relative', transition: 'background 0.2s',
-                    }}
-                >
-                    <div style={{
-                        width: '20px', height: '20px', borderRadius: '50%', background: '#fff',
-                        position: 'absolute', top: '2px',
-                        left: enabled ? '22px' : '2px', transition: 'left 0.2s',
-                    }} />
-                </div>
-            </div>
-
-            {/* Batch Create */}
-            <div className="card" style={{ padding: '16px', marginBottom: '16px' }}>
-                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                    {t('enterprise.invites.createTitle', 'Create Invitation Codes')}
-                </div>
-                <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
-                    <div className="form-group" style={{ flex: 1 }}>
-                        <label className="form-label" style={{ fontSize: '11px' }}>
-                            {t('enterprise.invites.count', 'Number of Codes')}
-                        </label>
-                        <input className="form-input" type="number" min={1} max={100}
-                            value={batchCount} onChange={e => setBatchCount(Number(e.target.value))} />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                        <label className="form-label" style={{ fontSize: '11px' }}>
-                            {t('enterprise.invites.maxUses', 'Max Uses per Code')}
-                        </label>
-                        <input className="form-input" type="number" min={1}
-                            value={maxUses} onChange={e => setMaxUses(Number(e.target.value))} />
-                    </div>
-                    <button className="btn btn-primary" onClick={createBatch} disabled={creating}
-                        style={{ height: '36px', whiteSpace: 'nowrap' }}>
-                        {creating ? t('common.loading') : t('enterprise.invites.createBtn', 'Generate')}
-                    </button>
-                </div>
-            </div>
-
-            {/* Codes Table */}
-            <div className="card" style={{ padding: '16px' }}>
-                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                    {t('enterprise.invites.listTitle', 'All Invitation Codes')} ({codes.length})
-                </div>
-                <div style={{
-                    display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 100px',
-                    gap: '12px', padding: '8px 12px', fontSize: '11px', fontWeight: 600,
-                    color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em',
-                    borderBottom: '1px solid var(--border-subtle)',
-                }}>
-                    <div>{t('enterprise.invites.code', 'Code')}</div>
-                    <div>{t('enterprise.invites.usage', 'Usage')}</div>
-                    <div>{t('enterprise.invites.status', 'Status')}</div>
-                    <div>{t('enterprise.invites.created', 'Created')}</div>
-                    <div></div>
-                </div>
-                {codes.length === 0 && (
-                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
-                        {t('common.noData')}
-                    </div>
-                )}
-                {codes.map((c: any) => (
-                    <div key={c.id} style={{
-                        display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 100px',
-                        gap: '12px', padding: '10px 12px', alignItems: 'center',
-                        borderBottom: '1px solid var(--border-subtle)', fontSize: '13px',
-                    }}>
-                        <div style={{ fontFamily: 'monospace', fontWeight: 500, letterSpacing: '0.1em' }}>{c.code}</div>
-                        <div>
-                            <span style={{ fontWeight: 500 }}>{c.used_count}</span>
-                            <span style={{ color: 'var(--text-tertiary)' }}> / {c.max_uses}</span>
-                        </div>
-                        <div>
-                            {!c.is_active ? (
-                                <span className="badge" style={{ background: 'var(--text-tertiary)', color: '#fff', fontSize: '10px' }}>
-                                    {t('enterprise.invites.deactivated', 'Disabled')}
-                                </span>
-                            ) : c.used_count >= c.max_uses ? (
-                                <span className="badge" style={{ background: 'var(--warning)', color: '#fff', fontSize: '10px' }}>
-                                    {t('enterprise.invites.exhausted', 'Exhausted')}
-                                </span>
-                            ) : (
-                                <span className="badge badge-success" style={{ fontSize: '10px' }}>
-                                    {t('enterprise.invites.active', 'Active')}
-                                </span>
-                            )}
-                        </div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                            {c.created_at ? new Date(c.created_at).toLocaleDateString() : '-'}
-                        </div>
-                        <div>
-                            {c.is_active && c.used_count < c.max_uses && (
-                                <button className="btn btn-secondary" style={{ padding: '2px 8px', fontSize: '10px' }}
-                                    onClick={() => deactivate(c.id)}>
-                                    {t('enterprise.invites.disable', 'Disable')}
-                                </button>
-                            )}
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
-    );
-}
-
-
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
     const qc = useQueryClient();
-    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites'>('info');
+    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users'>('info');
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -762,9 +584,9 @@ export default function EnterpriseSettings() {
                 </div>
 
                 <div className="tabs">
-                    {(['info', 'llm', 'tools', 'skills', 'quotas', 'users', 'invites', 'org', 'approvals', 'audit'] as const).map(tab => (
+                    {(['info', 'llm', 'tools', 'skills', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
                         <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
-                            {tab === 'quotas' ? 'Quotas' : tab === 'users' ? 'Users' : tab === 'invites' ? t('enterprise.invites.tabName', 'Invitation Codes') : t(`enterprise.tabs.${tab}`)}
+                            {tab === 'quotas' ? 'Quotas' : tab === 'users' ? 'Users' : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}
                 </div>
@@ -1065,10 +887,6 @@ export default function EnterpriseSettings() {
                     <UserManagement key={selectedTenantId} />
                 )}
 
-                {/* ── Invitation Codes Tab ── */}
-                {activeTab === 'invites' && (
-                    <InvitationCodesTab />
-                )}
 
                 {/* ── Tools Tab ── */}
                 {activeTab === 'tools' && (

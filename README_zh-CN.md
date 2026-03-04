@@ -110,7 +110,8 @@ Agent 可以在运行时**发现并安装新工具**。当 Agent 遇到无法处
 ```bash
 git clone https://github.com/dataelement/Clawith.git
 cd Clawith
-bash setup.sh
+bash setup.sh         # 生产/测试：只装运行依赖（约 1 分钟）
+bash setup.sh --dev   # 开发环境：额外装 pytest 等测试工具（约 3 分钟）
 ```
 
 自动完成：创建 `.env` → 设置 PostgreSQL（优先使用已有实例，找不到则**自动下载并启动本地实例**）→ 安装后端/前端依赖 → 建表 → 初始化默认公司、模板和技能。
