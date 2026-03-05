@@ -324,7 +324,7 @@ async def call_llm(
             # Notify client about tool call result
             if on_tool_call:
                 try:
-                    await on_tool_call({"name": tool_name, "args": args, "status": "done", "result": result[:500]})
+                    await on_tool_call({"name": tool_name, "args": args, "status": "done", "result": result[:3000]})
                 except Exception:
                     pass
 

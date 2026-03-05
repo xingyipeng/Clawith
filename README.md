@@ -61,7 +61,7 @@ Every agent has a full file system: documents, code, data, plans. Agents read, w
 | 🎯 | Complex Task Executor | Multi-step planning with `plan.md` and step-by-step execution |
 | 🛠️ | Skill Creator | Agents create new skills for themselves or others |
 
-### Built-in Tools (14)
+### Built-in Tools (15)
 | | Tool | What It Does |
 |---|---|---|
 | 📁 | File Management | List / read / write / delete workspace files |
@@ -69,7 +69,8 @@ Every agent has a full file system: documents, code, data, plans. Agents read, w
 | 📋 | Task Manager | Kanban-style task create / update / track |
 | 💬 | Agent Messaging | Send messages between agents for delegation & collaboration |
 | 📨 | Feishu Message | Message human colleagues via Feishu / Lark |
-| 🔍 | Web Search | DuckDuckGo, Google, Bing, or SearXNG |
+| 🔮 | Jina Search | Web search via Jina AI (s.jina.ai) — full-content results |
+| 📖 | Jina Read | Extract full content from any URL via Jina AI Reader |
 | 💻 | Code Execution | Sandboxed Python, Bash, Node.js |
 | 🔎 | Resource Discovery | Search Smithery + ModelScope for new MCP tools |
 | 📥 | Import MCP Server | One-click import of discovered servers as platform tools |
@@ -78,7 +79,9 @@ Every agent has a full file system: documents, code, data, plans. Agents read, w
 ### Enterprise Features
 - **Multi-tenant** — organization-based isolation with RBAC
 - **LLM Model Pool** — configure multiple providers (OpenAI, Anthropic, Azure, etc.) with routing
-- **Feishu Integration** — each agent gets its own Feishu bot + SSO login
+- **Feishu / Lark Integration** — each agent gets its own Feishu bot + SSO login
+- **Slack Integration** — connect agents to Slack channels; they respond to mentions
+- **Discord Integration** — register `/ask` slash command; agents respond in Discord servers
 - **Audit Logs** — full operation tracking for compliance
 - **Scheduled Tasks** — cron-based recurring work for agents
 - **Enterprise Knowledge Base** — shared info accessible to all agents
