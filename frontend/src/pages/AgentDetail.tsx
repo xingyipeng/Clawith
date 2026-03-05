@@ -684,7 +684,7 @@ export default function AgentDetail() {
         },
     });
 
-    // ─── Channel config ──────────────────────────────────
+    // ─── Channel config — Feishu ────────────────────────
     const [channelForm, setChannelForm] = useState({ app_id: '', app_secret: '', encrypt_key: '' });
 
     const saveChannel = useMutation({
@@ -694,6 +694,57 @@ export default function AgentDetail() {
         }),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: ['channel', id] }),
     });
+
+    // ─── Channel config — Slack ──────────────────────────
+    const [slackForm, setSlackForm] = useState({ bot_token: '', signing_secret: '' });
+    const { data: slackConfig } = useQuery({
+        queryKey: ['slack-channel', id],
+        queryFn: () => fetchAuth<any>(`/agents/${id}/slack-channel`).catch(() => null),
+        enabled: !!id && activeTab === 'settings',
+    });
+    const { data: slackWebhookData } = useQuery({
+        queryKey: ['slack-webhook-url', id],
+        queryFn: () => fetchAuth<any>(`/agents/${id}/slack-channel/webhook-url`),
+        enabled: !!id && activeTab === 'settings',
+    });
+    const saveSlack = useMutation({
+        mutationFn: () => fetchAuth(`/agents/${id}/slack-channel`, { method: 'POST', body: JSON.stringify(slackForm) }),
+        onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['slack-channel', id] }); setSlackForm({ bot_token: '', signing_secret: '' }); },
+    });
+    const deleteSlack = useMutation({
+        mutationFn: () => fetchAuth(`/agents/${id}/slack-channel`, { method: 'DELETE' }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['slack-channel', id] }),
+    });
+
+    // ─── Channel config — Discord ────────────────────────
+    const [discordForm, setDiscordForm] = useState({ application_id: '', bot_token: '', public_key: '' });
+    const { data: discordConfig } = useQuery({
+        queryKey: ['discord-channel', id],
+        queryFn: () => fetchAuth<any>(`/agents/${id}/discord-channel`).catch(() => null),
+        enabled: !!id && activeTab === 'settings',
+    });
+    const { data: discordWebhookData } = useQuery({
+        queryKey: ['discord-webhook-url', id],
+        queryFn: () => fetchAuth<any>(`/agents/${id}/discord-channel/webhook-url`),
+        enabled: !!id && activeTab === 'settings',
+    });
+    const saveDiscord = useMutation({
+        mutationFn: () => fetchAuth(`/agents/${id}/discord-channel`, { method: 'POST', body: JSON.stringify(discordForm) }),
+        onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['discord-channel', id] }); setDiscordForm({ application_id: '', bot_token: '', public_key: '' }); },
+    });
+    const deleteDiscord = useMutation({
+        mutationFn: () => fetchAuth(`/agents/${id}/discord-channel`, { method: 'DELETE' }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['discord-channel', id] }),
+    });
+
+    const CopyBtn = ({ url }: { url: string }) => (
+        <button title="Copy" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginLeft: '6px', padding: '1px 4px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)', verticalAlign: 'middle', lineHeight: 1 }}
+            onClick={() => navigator.clipboard.writeText(url).then(() => { })}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="4" width="9" height="11" rx="1.5" /><path d="M3 11H2a1 1 0 01-1-1V2a1 1 0 011-1h8a1 1 0 011 1v1" />
+            </svg>
+        </button>
+    );
 
     // ─── File viewer ─────────────────────────────────────
     const [viewingFile, setViewingFile] = useState<string | null>(null);
@@ -2272,6 +2323,91 @@ export default function AgentDetail() {
                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>DingTalk</div>
                                             </div>
                                         </div>
+                                    </div>
+
+                                    {/* Slack */}
+                                    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '16px', marginBottom: '12px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M6.194 14.644a2.194 2.194 0 110 4.388 2.194 2.194 0 010-4.388zm-2.194 0H0v-2.194a2.194 2.194 0 014.388 0v2.194zm16.612 0a2.194 2.194 0 110 4.388 2.194 2.194 0 010-4.388zm0-2.194a2.194 2.194 0 010-4.388 2.194 2.194 0 010 4.388zm0 0v2.194h2.194A2.194 2.194 0 0024 12.45a2.194 2.194 0 00-2.194-2.194h-1.194zm-16.612 0a2.194 2.194 0 010-4.388 2.194 2.194 0 010 4.388zm0 0v2.194H2A2.194 2.194 0 010 12.45a2.194 2.194 0 012.194-2.194h1.806z" fill="#611F69" opacity=".4" /><path d="M9.388 4.388a2.194 2.194 0 110-4.388 2.194 2.194 0 010 4.388zm0 2.194v-2.194H7.194A2.194 2.194 0 005 6.582a2.194 2.194 0 002.194 2.194h2.194zm0 12.612a2.194 2.194 0 110 4.388 2.194 2.194 0 010-4.388zm0-2.194v2.194H7.194A2.194 2.194 0 005 17.418a2.194 2.194 0 002.194 2.194h.194zm4.224-12.612a2.194 2.194 0 110-4.388 2.194 2.194 0 010 4.388zm2.194 0H13.612V2.194a2.194 2.194 0 014.388 0v2.194zm-2.194 14.806a2.194 2.194 0 110 4.388 2.194 2.194 0 010-4.388zm-2.194 0h2.194v2.194a2.194 2.194 0 01-4.388 0v-2.194z" fill="#611F69" /></svg>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '14px' }}>Slack</div>
+                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>Slack Bot</div>
+                                                </div>
+                                            </div>
+                                            {slackConfig && <span className={`badge ${slackConfig.is_configured ? 'badge-success' : 'badge-warning'}`}>{slackConfig.is_configured ? t('agent.settings.channel.configured') : t('agent.settings.channel.notConfigured')}</span>}
+                                        </div>
+                                        {slackConfig ? (
+                                            <div>
+                                                <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', fontFamily: 'var(--font-mono)', marginBottom: '12px' }}>
+                                                    <div style={{ color: 'var(--text-tertiary)', marginBottom: '6px' }}>Webhook URL (Event Subscriptions URL)</div>
+                                                    <div style={{ lineHeight: 1.6, wordBreak: 'break-all' }}>
+                                                        <span style={{ color: 'var(--accent-primary)' }}>{slackWebhookData?.webhook_url || `${window.location.origin}/api/channel/slack/${id}/webhook`}</span>
+                                                        <CopyBtn url={slackWebhookData?.webhook_url || `${window.location.origin}/api/channel/slack/${id}/webhook`} />
+                                                    </div>
+                                                </div>
+                                                <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => deleteSlack.mutate()}>Disconnect</button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                <div>
+                                                    <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Bot Token *</label>
+                                                    <input className="input" value={slackForm.bot_token} onChange={e => setSlackForm({ ...slackForm, bot_token: e.target.value })} placeholder="xoxb-..." style={{ fontSize: '12px' }} />
+                                                </div>
+                                                <div>
+                                                    <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Signing Secret *</label>
+                                                    <input className="input" type="password" value={slackForm.signing_secret} onChange={e => setSlackForm({ ...slackForm, signing_secret: e.target.value })} style={{ fontSize: '12px' }} />
+                                                </div>
+                                                <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={() => saveSlack.mutate()} disabled={!slackForm.bot_token || !slackForm.signing_secret || saveSlack.isPending}>
+                                                    {saveSlack.isPending ? t('common.loading') : t('agent.settings.channel.saveChannel')}
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Discord */}
+                                    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '16px', marginBottom: '12px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028 14.09 14.09 0 001.226-1.994.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" /></svg>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '14px' }}>Discord</div>
+                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>Slash Commands (/ask)</div>
+                                                </div>
+                                            </div>
+                                            {discordConfig && <span className={`badge ${discordConfig.is_configured ? 'badge-success' : 'badge-warning'}`}>{discordConfig.is_configured ? t('agent.settings.channel.configured') : t('agent.settings.channel.notConfigured')}</span>}
+                                        </div>
+                                        {discordConfig ? (
+                                            <div>
+                                                <div style={{ background: 'var(--bg-secondary)', borderRadius: '6px', padding: '10px', fontSize: '12px', fontFamily: 'var(--font-mono)', marginBottom: '12px' }}>
+                                                    <div style={{ color: 'var(--text-tertiary)', marginBottom: '6px' }}>Interactions Endpoint URL</div>
+                                                    <div style={{ lineHeight: 1.6, wordBreak: 'break-all' }}>
+                                                        <span style={{ color: 'var(--accent-primary)' }}>{discordWebhookData?.webhook_url || `${window.location.origin}/api/channel/discord/${id}/webhook`}</span>
+                                                        <CopyBtn url={discordWebhookData?.webhook_url || `${window.location.origin}/api/channel/discord/${id}/webhook`} />
+                                                    </div>
+                                                </div>
+                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>Use <code>/ask message:&lt;your question&gt;</code> to talk to this agent</div>
+                                                <button className="btn btn-danger" style={{ fontSize: '12px', padding: '4px 12px' }} onClick={() => deleteDiscord.mutate()}>Disconnect</button>
+                                            </div>
+                                        ) : (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                <div>
+                                                    <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Application ID *</label>
+                                                    <input className="input" value={discordForm.application_id} onChange={e => setDiscordForm({ ...discordForm, application_id: e.target.value })} placeholder="1234567890" style={{ fontSize: '12px' }} />
+                                                </div>
+                                                <div>
+                                                    <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Bot Token *</label>
+                                                    <input className="input" type="password" value={discordForm.bot_token} onChange={e => setDiscordForm({ ...discordForm, bot_token: e.target.value })} style={{ fontSize: '12px' }} />
+                                                </div>
+                                                <div>
+                                                    <label style={{ fontSize: '12px', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Public Key *</label>
+                                                    <input className="input" value={discordForm.public_key} onChange={e => setDiscordForm({ ...discordForm, public_key: e.target.value })} style={{ fontSize: '12px' }} />
+                                                </div>
+                                                <button className="btn btn-primary" style={{ fontSize: '12px', alignSelf: 'flex-start' }} onClick={() => saveDiscord.mutate()} disabled={!discordForm.application_id || !discordForm.bot_token || !discordForm.public_key || saveDiscord.isPending}>
+                                                    {saveDiscord.isPending ? t('common.loading') : t('agent.settings.channel.saveChannel')}
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
 
                                     {/* WeCom — coming soon */}

@@ -24,6 +24,7 @@ dependencies = [
     "trafilatura>=1.12.0",
     "lxml>=5.0.0",
     "lxml-html-clean>=0.4.0",
+    "PyNaCl>=1.5.0",
 ]
 
 [project.optional-dependencies]
