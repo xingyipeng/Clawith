@@ -360,8 +360,6 @@ async def get_agent_tools_with_config(
         tid = str(t.id)
         at = assignments.get(tid)
         enabled = at.enabled if at else t.is_default
-        if not enabled:
-            continue
         result.append({
             "id": tid,
             "name": t.name,
@@ -370,6 +368,9 @@ async def get_agent_tools_with_config(
             "type": t.type,
             "category": t.category,
             "icon": t.icon,
+            "enabled": enabled,
+            "is_default": t.is_default,
+            "mcp_server_name": t.mcp_server_name,
             "config_schema": t.config_schema or {},
             "global_config": t.config or {},
             "agent_config": (at.config if at else {}) or {},
