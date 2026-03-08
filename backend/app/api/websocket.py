@@ -163,6 +163,13 @@ async def call_llm(
         tool_calls_data = []  # accumulate tool calls from stream
         last_finish_reason = None
         _max_retries = 3
+
+        # ── Streaming <think> tag filter state ──
+        # Some reasoning models (MiniMax, DeepSeek-R1) wrap internal
+        # chain-of-thought in <think>...</think> tags inside the content
+        # field.  We suppress these from being streamed to the user.
+        _in_think = False        # True while inside <think>...</think>
+        _tag_buffer = ""         # buffer for partial tag matching
         for _attempt in range(_max_retries):
             try:
                 async with httpx.AsyncClient(timeout=120) as client:
@@ -206,13 +213,60 @@ async def call_llm(
                             if len(full_content) == 0 and not tool_calls_data:
                                 print(f"[LLM-DBG] chunk: delta={delta}, finish={fr}", flush=True)
 
-                            # Text content
+                            # Text content — filter out <think>...</think> blocks
                             if delta.get("content"):
                                 text = delta["content"]
                                 full_content += text
-                                if on_chunk:
+
+                                # ── streaming think-tag filter ──
+                                # Process text through a simple state machine:
+                                #   _in_think=False: emit text, but watch for "<think>"
+                                #   _in_think=True:  swallow text until "</think>"
+                                # We buffer chars that *might* be part of a tag to
+                                # avoid sending partial tags to the client.
+                                _tag_buffer += text
+                                emit = ""
+                                i = 0
+                                buf = _tag_buffer
+                                while i < len(buf):
+                                    if not _in_think:
+                                        # Look for <think> open tag
+                                        if buf[i] == '<':
+                                            tag_candidate = buf[i:]
+                                            open_tag = "<think>"
+                                            if tag_candidate.startswith(open_tag):
+                                                _in_think = True
+                                                i += len(open_tag)
+                                                continue
+                                            elif open_tag.startswith(tag_candidate):
+                                                # Partial match — keep in buffer, wait for more
+                                                _tag_buffer = buf[i:]
+                                                break
+                                            else:
+                                                emit += buf[i]
+                                                i += 1
+                                        else:
+                                            emit += buf[i]
+                                            i += 1
+                                    else:
+                                        # Inside <think> — look for </think> close tag
+                                        if buf[i] == '<':
+                                            tag_candidate = buf[i:]
+                                            close_tag = "</think>"
+                                            if tag_candidate.startswith(close_tag):
+                                                _in_think = False
+                                                i += len(close_tag)
+                                                continue
+                                            elif close_tag.startswith(tag_candidate):
+                                                _tag_buffer = buf[i:]
+                                                break
+                                        i += 1  # swallow char inside think block
+                                else:
+                                    _tag_buffer = ""  # fully consumed
+
+                                if emit and on_chunk:
                                     try:
-                                        await on_chunk(text)
+                                        await on_chunk(emit)
                                     except Exception:
                                         pass
 
@@ -272,6 +326,9 @@ async def call_llm(
 
         # If no tool calls, return final text
         if not tool_calls_data:
+            # Strip <think>...</think> from final content (reasoning models)
+            import re as _re
+            full_content = _re.sub(r'<think>[\s\S]*?</think>\s*', '', full_content).strip()
             # Track token usage
             if agent_id:
                 try:
