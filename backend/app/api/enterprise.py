@@ -326,6 +326,23 @@ class SettingUpdate(BaseModel):
     value: dict
 
 
+@router.get("/system-settings/notification_bar/public")
+async def get_notification_bar_public(
+    db: AsyncSession = Depends(get_db),
+):
+    """Public (no auth) endpoint to read the notification bar config."""
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key == "notification_bar")
+    )
+    setting = result.scalar_one_or_none()
+    if not setting or not setting.value:
+        return {"enabled": False, "text": ""}
+    return {
+        "enabled": setting.value.get("enabled", False),
+        "text": setting.value.get("text", ""),
+    }
+
+
 @router.get("/system-settings/{key}")
 async def get_system_setting(
     key: str,

@@ -836,6 +836,9 @@ export default function EnterpriseSettings() {
                 {/* ── Company Management ── */}
                 {activeTab === 'info' && (
                     <div>
+                        {/* ── Notification Bar Config ── */}
+                        <NotificationBarConfig />
+
                         {/* ── 0. Company Name ── */}
                         <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyName.title', 'Company Name')}</h3>
                         <CompanyNameEditor />

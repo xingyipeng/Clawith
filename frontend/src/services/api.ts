@@ -252,3 +252,15 @@ export const skillApi = {
             request<any>(`/skills/browse/delete?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
     },
 };
+
+// ─── Triggers (Pulse Engine) ──────────────────────────
+export const triggerApi = {
+    list: (agentId: string) =>
+        request<any[]>(`/agents/${agentId}/triggers`),
+
+    update: (agentId: string, triggerId: string, data: any) =>
+        request<any>(`/agents/${agentId}/triggers/${triggerId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    delete: (agentId: string, triggerId: string) =>
+        request<void>(`/agents/${agentId}/triggers/${triggerId}`, { method: 'DELETE' }),
+};

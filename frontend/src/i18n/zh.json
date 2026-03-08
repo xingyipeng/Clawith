@@ -103,6 +103,7 @@
     "tabs": {
       "status": "状态",
       "tasks": "任务",
+      "pulse": "Pulse",
       "mind": "心智",
       "tools": "工具",
       "skills": "技能",
@@ -169,6 +170,28 @@
       "every2days": "每隔2天",
       "every3days": "每隔3天",
       "weekly": "每周"
+    },
+    "pulse": {
+      "agenda": "Agenda",
+      "agendaDesc": "Agent 自主管理的任务清单",
+      "agendaEmpty": "暂无 Agenda 内容。Agent 在对话中会自动创建和更新 agenda.md",
+      "viewRawMarkdown": "查看原始 Markdown",
+      "triggers": "触发器",
+      "triggersDesc": "由 Agent 自主设置和管理",
+      "triggersEmpty": "暂无触发器。在对话中告诉 Agent 你的需求，它会自动创建触发器。",
+      "fired": "触发 {{count}} 次",
+      "disabled": "已禁用",
+      "disable": "禁用",
+      "enable": "启用",
+      "deleteTriggerConfirm": "确定删除触发器 \"{{name}}\"？",
+      "monologue": "内心独白",
+      "monologueDesc": "Agent 被触发器唤醒后的自主行为记录",
+      "monologueEmpty": "暂无内心独白记录。当触发器触发时，Agent 的行为会记录在这里。",
+      "history": "历史",
+      "historyTitle": "任务历史",
+      "historyDesc": "已完成任务的归档记录",
+      "historyEmpty": "暂无历史记录。Agent 会将完成的 Agenda 条目归档到 task_history.md",
+      "scheduledTriggers": "计划中的触发器"
     },
     "soul": {
       "title": "Soul.md — 人格定义",

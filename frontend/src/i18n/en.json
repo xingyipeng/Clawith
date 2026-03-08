@@ -103,6 +103,7 @@
     "tabs": {
       "status": "Status",
       "tasks": "Tasks",
+      "pulse": "Pulse",
       "mind": "Mind",
       "tools": "Tools",
       "skills": "Skills",
@@ -169,6 +170,28 @@
       "every2days": "Every 2 days",
       "every3days": "Every 3 days",
       "weekly": "Weekly"
+    },
+    "pulse": {
+      "agenda": "Agenda",
+      "agendaDesc": "Agent's self-managed task list",
+      "agendaEmpty": "No Agenda items yet. The agent will create and update agenda.md during conversations.",
+      "viewRawMarkdown": "View raw Markdown",
+      "triggers": "Triggers",
+      "triggersDesc": "Set and managed by the agent autonomously",
+      "triggersEmpty": "No triggers yet. Tell the agent what you need, and it will create triggers automatically.",
+      "fired": "fired {{count}} times",
+      "disabled": "Disabled",
+      "disable": "Disable",
+      "enable": "Enable",
+      "deleteTriggerConfirm": "Delete trigger \"{{name}}\"?",
+      "monologue": "Inner Monologue",
+      "monologueDesc": "Records of the agent's autonomous actions when awakened by triggers",
+      "monologueEmpty": "No inner monologue records yet. The agent's actions taken by trigger will appear here.",
+      "history": "History",
+      "historyTitle": "Task History",
+      "historyDesc": "Archive of completed tasks",
+      "historyEmpty": "No history records yet. The agent will archive completed Agenda items to task_history.md.",
+      "scheduledTriggers": "Scheduled Triggers"
     },
     "soul": {
       "title": "Soul.md — Personality Definition",

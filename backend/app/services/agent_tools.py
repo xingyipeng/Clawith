@@ -74,7 +74,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write or update a file in the workspace. Can update memory/memory.md, create documents in workspace/, create skills in skills/. Note: tasks.json is read-only — use manage_tasks instead.",
+            "description": "Write or update a file in the workspace. Can update memory/memory.md, agenda.md, task_history.md, create documents in workspace/, create skills in skills/.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -155,6 +155,94 @@ AGENT_TOOLS = [
                     },
                 },
                 "required": ["action", "title"],
+            },
+        },
+    },
+    # --- Trigger management tools (Pulse engine) ---
+    {
+        "type": "function",
+        "function": {
+            "name": "set_trigger",
+            "description": "Set a new trigger to wake yourself up at a specific time or condition. Use this to schedule future actions, monitor changes, or wait for agent messages. The trigger will fire and invoke you with the reason text as context. Trigger types: 'cron' (recurring schedule), 'once' (fire once at a time), 'interval' (every N minutes), 'poll' (HTTP monitoring), 'on_message' (when another agent replies).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Unique name for this trigger, e.g. 'daily_briefing' or 'wait_morty_reply'",
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": ["cron", "once", "interval", "poll", "on_message"],
+                        "description": "Trigger type",
+                    },
+                    "config": {
+                        "type": "object",
+                        "description": "Type-specific config. cron: {\"expr\": \"0 9 * * *\"}. once: {\"at\": \"2026-03-10T09:00:00+08:00\"}. interval: {\"minutes\": 30}. poll: {\"url\": \"...\", \"json_path\": \"$.status\", \"fire_on\": \"change\", \"interval_min\": 5}. on_message: {\"from_agent_name\": \"Morty\"}",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "What you should do when this trigger fires. This will be shown to you as context when you wake up.",
+                    },
+                    "agenda_ref": {
+                        "type": "string",
+                        "description": "Optional: which agenda item this trigger relates to",
+                    },
+                },
+                "required": ["name", "type", "config", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_trigger",
+            "description": "Update an existing trigger's configuration or reason. Use this to adjust timing, change parameters, etc. For example, change interval from 5 minutes to 30 minutes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the trigger to update",
+                    },
+                    "config": {
+                        "type": "object",
+                        "description": "New config (replaces existing config)",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "New reason text",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_trigger",
+            "description": "Cancel (disable) a trigger by name. Use this when a task is completed and the trigger is no longer needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the trigger to cancel",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_triggers",
+            "description": "List all your active triggers. Shows name, type, config, reason, fire count, and status.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -568,6 +656,14 @@ async def execute_tool(
             result = _delete_file(ws, arguments.get("path", ""))
         elif tool_name == "manage_tasks":
             result = await _manage_tasks(agent_id, user_id, ws, arguments)
+        elif tool_name == "set_trigger":
+            result = await _handle_set_trigger(agent_id, arguments)
+        elif tool_name == "update_trigger":
+            result = await _handle_update_trigger(agent_id, arguments)
+        elif tool_name == "cancel_trigger":
+            result = await _handle_cancel_trigger(agent_id, arguments)
+        elif tool_name == "list_triggers":
+            result = await _handle_list_triggers(agent_id)
         elif tool_name == "send_feishu_message":
             result = await _send_feishu_message(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
@@ -2026,3 +2122,230 @@ async def _import_mcp_server(agent_id: uuid.UUID, arguments: dict) -> str:
 
     from app.services.resource_discovery import import_mcp_from_smithery
     return await import_mcp_from_smithery(server_id, agent_id, config or None)
+
+
+# ─── Trigger Management Handlers (Pulse Engine) ────────────────────
+
+MAX_TRIGGERS_PER_AGENT = 20
+VALID_TRIGGER_TYPES = {"cron", "once", "interval", "poll", "on_message"}
+
+
+async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Create a new trigger for the agent."""
+    from app.models.trigger import AgentTrigger
+
+    name = arguments.get("name", "").strip()
+    ttype = arguments.get("type", "").strip()
+    config = arguments.get("config", {})
+    reason = arguments.get("reason", "").strip()
+    agenda_ref = arguments.get("agenda_ref", "")
+
+    if not name:
+        return "❌ Missing required argument 'name'"
+    if ttype not in VALID_TRIGGER_TYPES:
+        return f"❌ Invalid trigger type '{ttype}'. Valid types: {', '.join(VALID_TRIGGER_TYPES)}"
+    if not reason:
+        return "❌ Missing required argument 'reason'"
+
+    # Validate type-specific config
+    if ttype == "cron":
+        expr = config.get("expr", "")
+        if not expr:
+            return "❌ cron trigger requires config.expr, e.g. {\"expr\": \"0 9 * * *\"}"
+        try:
+            from croniter import croniter
+            croniter(expr)
+        except Exception:
+            return f"❌ Invalid cron expression: '{expr}'"
+    elif ttype == "once":
+        if not config.get("at"):
+            return "❌ once trigger requires config.at, e.g. {\"at\": \"2026-03-10T09:00:00+08:00\"}"
+    elif ttype == "interval":
+        if not config.get("minutes"):
+            return "❌ interval trigger requires config.minutes, e.g. {\"minutes\": 30}"
+    elif ttype == "poll":
+        if not config.get("url"):
+            return "❌ poll trigger requires config.url"
+    elif ttype == "on_message":
+        if not config.get("from_agent_name"):
+            return "❌ on_message trigger requires config.from_agent_name"
+
+    try:
+        async with async_session() as db:
+            # Check max triggers
+            from sqlalchemy import func as sa_func
+            result = await db.execute(
+                select(sa_func.count()).select_from(AgentTrigger).where(
+                    AgentTrigger.agent_id == agent_id,
+                    AgentTrigger.is_enabled == True,
+                )
+            )
+            count = result.scalar() or 0
+            if count >= MAX_TRIGGERS_PER_AGENT:
+                return f"❌ Maximum trigger limit reached ({MAX_TRIGGERS_PER_AGENT}). Cancel some triggers first."
+
+            # Check for duplicate name
+            result = await db.execute(
+                select(AgentTrigger).where(
+                    AgentTrigger.agent_id == agent_id,
+                    AgentTrigger.name == name,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                if existing.is_enabled:
+                    return f"❌ Trigger '{name}' already exists and is active. Use update_trigger to modify it, or cancel_trigger first."
+                else:
+                    # Re-enable disabled trigger with new config
+                    existing.type = ttype
+                    existing.config = config
+                    existing.reason = reason
+                    existing.agenda_ref = agenda_ref or None
+                    existing.is_enabled = True
+                    existing.fire_count = 0
+                    existing.last_fired_at = None
+                    await db.commit()
+                    return f"✅ Trigger '{name}' re-enabled with new configuration ({ttype})"
+
+            trigger = AgentTrigger(
+                agent_id=agent_id,
+                name=name,
+                type=ttype,
+                config=config,
+                reason=reason,
+                agenda_ref=agenda_ref or None,
+            )
+            db.add(trigger)
+            await db.commit()
+
+        # Activity log
+        try:
+            from app.services.audit_logger import write_audit_log
+            await write_audit_log("trigger_created", {
+                "name": name, "type": ttype, "reason": reason[:100],
+            }, agent_id=agent_id)
+        except Exception:
+            pass
+
+        return f"✅ Trigger '{name}' created ({ttype}). It will fire according to your config and wake you up with the reason as context."
+
+    except Exception as e:
+        return f"❌ Failed to create trigger: {e}"
+
+
+async def _handle_update_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Update an existing trigger's config or reason."""
+    from app.models.trigger import AgentTrigger
+
+    name = arguments.get("name", "").strip()
+    if not name:
+        return "❌ Missing required argument 'name'"
+
+    new_config = arguments.get("config")
+    new_reason = arguments.get("reason")
+
+    if new_config is None and new_reason is None:
+        return "❌ Provide at least one of 'config' or 'reason' to update"
+
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(AgentTrigger).where(
+                    AgentTrigger.agent_id == agent_id,
+                    AgentTrigger.name == name,
+                )
+            )
+            trigger = result.scalar_one_or_none()
+            if not trigger:
+                return f"❌ Trigger '{name}' not found"
+
+            changes = []
+            if new_config is not None:
+                old_config = trigger.config
+                trigger.config = new_config
+                changes.append(f"config: {old_config} → {new_config}")
+            if new_reason is not None:
+                trigger.reason = new_reason
+                changes.append(f"reason updated")
+
+            await db.commit()
+
+        try:
+            from app.services.audit_logger import write_audit_log
+            await write_audit_log("trigger_updated", {
+                "name": name, "changes": "; ".join(changes),
+            }, agent_id=agent_id)
+        except Exception:
+            pass
+
+        return f"✅ Trigger '{name}' updated: {'; '.join(changes)}"
+
+    except Exception as e:
+        return f"❌ Failed to update trigger: {e}"
+
+
+async def _handle_cancel_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Cancel (disable) a trigger by name."""
+    from app.models.trigger import AgentTrigger
+
+    name = arguments.get("name", "").strip()
+    if not name:
+        return "❌ Missing required argument 'name'"
+
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(AgentTrigger).where(
+                    AgentTrigger.agent_id == agent_id,
+                    AgentTrigger.name == name,
+                )
+            )
+            trigger = result.scalar_one_or_none()
+            if not trigger:
+                return f"❌ Trigger '{name}' not found"
+            if not trigger.is_enabled:
+                return f"ℹ️ Trigger '{name}' is already disabled"
+
+            trigger.is_enabled = False
+            await db.commit()
+
+        try:
+            from app.services.audit_logger import write_audit_log
+            await write_audit_log("trigger_cancelled", {"name": name}, agent_id=agent_id)
+        except Exception:
+            pass
+
+        return f"✅ Trigger '{name}' cancelled. It will no longer fire."
+
+    except Exception as e:
+        return f"❌ Failed to cancel trigger: {e}"
+
+
+async def _handle_list_triggers(agent_id: uuid.UUID) -> str:
+    """List all active triggers for the agent."""
+    from app.models.trigger import AgentTrigger
+
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(AgentTrigger).where(
+                    AgentTrigger.agent_id == agent_id,
+                ).order_by(AgentTrigger.created_at.desc())
+            )
+            triggers = result.scalars().all()
+
+        if not triggers:
+            return "No triggers found. Use set_trigger to create one."
+
+        lines = ["| Name | Type | Config | Reason | Status | Fires |", "|------|------|--------|--------|--------|-------|"]
+        for t in triggers:
+            status = "✅ active" if t.is_enabled else "⏸ disabled"
+            config_str = str(t.config)[:50]
+            reason_str = t.reason[:40] if t.reason else ""
+            lines.append(f"| {t.name} | {t.type} | {config_str} | {reason_str} | {status} | {t.fire_count} |")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"❌ Failed to list triggers: {e}"
+

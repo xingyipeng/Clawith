@@ -57,9 +57,7 @@ async def lifespan(app: FastAPI):
     import asyncio
     import sys
     import os
-    from app.services.scheduler import start_scheduler
-    from app.services.heartbeat import start_heartbeat
-    from app.services.supervision_reminder import start_supervision_reminder
+    from app.services.trigger_daemon import start_trigger_daemon
     from app.services.tool_seeder import seed_builtin_tools
     from app.services.template_seeder import seed_agent_templates
 
@@ -84,6 +82,7 @@ async def lifespan(app: FastAPI):
         import app.models.tenant         # noqa
         import app.models.participant    # noqa
         import app.models.chat_session   # noqa
+        import app.models.trigger        # noqa
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         print("[startup] ✅ Database tables ready", flush=True)
@@ -133,9 +132,7 @@ async def lifespan(app: FastAPI):
                 traceback.print_exception(type(exc), exc, exc.__traceback__)
 
         for name, coro in [
-            ("scheduler", start_scheduler()),
-            ("heartbeat", start_heartbeat()),
-            ("supervision", start_supervision_reminder()),
+            ("trigger_daemon", start_trigger_daemon()),
         ]:
             task = asyncio.create_task(coro, name=name)
             task.add_done_callback(_bg_task_error)
@@ -196,6 +193,7 @@ from app.api.users import router as users_router
 from app.api.chat_sessions import router as chat_sessions_router
 from app.api.slack import router as slack_router
 from app.api.discord_bot import router as discord_router
+from app.api.triggers import router as triggers_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
@@ -218,6 +216,7 @@ app.include_router(skills_router, prefix=settings.API_PREFIX)
 app.include_router(users_router, prefix=settings.API_PREFIX)
 app.include_router(slack_router, prefix=settings.API_PREFIX)
 app.include_router(discord_router, prefix=settings.API_PREFIX)
+app.include_router(triggers_router)
 app.include_router(chat_sessions_router)
 app.include_router(plaza_router)
 app.include_router(ws_router)

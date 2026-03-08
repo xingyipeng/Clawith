@@ -33,6 +33,7 @@ async def main():
     import app.models.tenant         # noqa
     import app.models.participant     # noqa
     import app.models.chat_session   # noqa
+    import app.models.trigger        # noqa
 
     # Create all tables that don't exist yet (safe to run on every startup)
     async with engine.begin() as conn:

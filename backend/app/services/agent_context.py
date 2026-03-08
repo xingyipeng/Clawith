@@ -217,14 +217,54 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
     if relationships and "暂无" not in relationships and "None yet" not in relationships:
         parts.append(f"\n## Relationships\n{relationships}")
 
+    # --- Agenda (Pulse engine) ---
+    agenda = (
+        _read_file_safe(tool_ws / "agenda.md", 3000)
+        or _read_file_safe(data_ws / "agenda.md", 3000)
+    )
+    if agenda and agenda.strip() not in ("# Agenda", "（暂无）"):
+        # Strip heading
+        if agenda.startswith("# "):
+            agenda = "\n".join(agenda.split("\n")[1:]).strip()
+        parts.append(f"\n## Agenda\n{agenda}")
+
+    # --- Active Triggers ---
+    try:
+        from app.database import async_session
+        from app.models.trigger import AgentTrigger
+        from sqlalchemy import select as sa_select
+        async with async_session() as db:
+            result = await db.execute(
+                sa_select(AgentTrigger).where(
+                    AgentTrigger.agent_id == agent_id,
+                    AgentTrigger.is_enabled == True,
+                )
+            )
+            triggers = result.scalars().all()
+            if triggers:
+                lines = [
+                    "You have the following active triggers:",
+                    "",
+                    "| Name | Type | Config | Reason |",
+                    "|------|------|--------|--------|",
+                ]
+                for t in triggers:
+                    config_str = str(t.config)[:60]
+                    reason_str = (t.reason or "")[:60]
+                    lines.append(f"| {t.name} | {t.type} | {config_str} | {reason_str} |")
+                parts.append("\n## Active Triggers\n" + "\n".join(lines))
+    except Exception:
+        pass
+
     parts.append("""
 ## Workspace & Tools
 
 You have a dedicated workspace with this structure:
-  - tasks.json     → Your real task list (read-only; use `manage_tasks` tool to manage)
+  - agenda.md      → Your task agenda (ALWAYS read this first when waking up)
+  - task_history.md → Archive of completed tasks
   - soul.md        → Your personality definition
   - memory/memory.md → Your long-term memory and notes
-  - memory/reflections.md → Your autonomous thinking journal (hypotheses, discoveries, ongoing inquiries)
+  - memory/reflections.md → Your autonomous thinking journal
   - skills/        → Your skill definition files (one .md per skill)
   - workspace/     → Your work files (reports, documents, etc.)
   - relationships.md → Your relationship list
@@ -237,24 +277,35 @@ You have a dedicated workspace with this structure:
    - To read a file → CALL `read_file` or `read_document`
    - To write a file → CALL `write_file`
    - To delete a file → CALL `delete_file`
-   - To view tasks → CALL `read_file` with path `tasks.json`
-   - To create/update/delete tasks → CALL `manage_tasks`
 
 2. **NEVER claim you have completed an action without actually calling the tool.**
-   If you say "I have deleted the file" without calling `delete_file`, that is a LIE.
-   If you say "I have read the file" without calling `read_file`, that is a LIE.
 
 3. **NEVER fabricate file contents or tool results from memory.**
    Even if you saw a file before, you MUST call the tool again to get current data.
 
 4. **Use `write_file` to update memory/memory.md with important information.**
 
-5. **During heartbeats, record your thinking and discoveries in memory/reflections.md.**
+5. **Use `write_file` to update agenda.md with your current tasks and progress.**
+   - Keep your agenda concise and organized (进行中 / 等待中 / 近期已完成)
+   - Archive completed items to task_history.md when they pile up
 
-6. **Use `send_feishu_message` to message human colleagues in your relationships.**
+6. **Use trigger tools to manage your own wake-up conditions:**
+   - `set_trigger` — schedule future actions, wait for agent replies
+   - `update_trigger` — adjust parameters (e.g. change frequency)
+   - `cancel_trigger` — remove triggers when tasks are complete
+   - `list_triggers` — see your active triggers
 
-7. **Reply in the same language the user uses.**
+7. **Agenda is your working memory — use it wisely:**
+   - When waking up, ALWAYS check your agenda first
+   - Pending items in agenda are REFERENCE, not commands
+   - Decide whether to mention pending tasks based on timing, context, and urgency
+   - DON'T mechanically remind people of every pending item
 
-8. **Never assume a file exists — always verify with `list_files` first.**""")
+8. **Use `send_feishu_message` to message human colleagues in your relationships.**
+
+9. **Reply in the same language the user uses.**
+
+10. **Never assume a file exists — always verify with `list_files` first.**""")
 
     return "\n".join(parts)
+

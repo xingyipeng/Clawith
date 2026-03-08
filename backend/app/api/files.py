@@ -7,6 +7,7 @@ from pathlib import Path
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -107,11 +108,37 @@ async def read_file(
 async def download_file(
     agent_id: uuid.UUID,
     path: str,
-    current_user: User = Depends(get_current_user),
+    token: str = "",
+    credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
     db: AsyncSession = Depends(get_db),
 ):
-    """Download / serve a file from the agent workspace (browser-friendly)."""
-    await check_agent_access(db, current_user, agent_id)
+    """Download / serve a file from the agent workspace (browser-friendly).
+    
+    Auth via Bearer header OR `token` query parameter (for <img> tags).
+    """
+    from app.core.security import decode_access_token
+
+    # Resolve JWT token from either Bearer header or query param
+    jwt_token = None
+    if credentials:
+        jwt_token = credentials.credentials
+    elif token:
+        jwt_token = token
+
+    if not jwt_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+    payload = decode_access_token(jwt_token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+
+    await check_agent_access(db, user, agent_id)
     target = _safe_path(agent_id, path)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")

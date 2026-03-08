@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { agentApi, taskApi, fileApi, channelApi, enterpriseApi, activityApi, scheduleApi, skillApi } from '../services/api';
+import { agentApi, taskApi, fileApi, channelApi, enterpriseApi, activityApi, scheduleApi, skillApi, triggerApi } from '../services/api';
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import { useAuthStore } from '../stores';
 import PromptModal from '../components/PromptModal';
@@ -10,7 +10,7 @@ import ConfirmModal from '../components/ConfirmModal';
 import FileBrowser from '../components/FileBrowser';
 import type { FileBrowserApi } from '../components/FileBrowser';
 
-const TABS = ['status', 'tasks', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'settings'] as const;
+const TABS = ['status', 'pulse', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'settings'] as const;
 
 const getCategoryLabels = (t: any): Record<string, string> => ({
     file: t('agent.toolCategories.file'),
@@ -498,12 +498,30 @@ export default function AgentDetail() {
         enabled: !!id,
     });
 
-    const { data: tasks = [] } = useQuery({
-        queryKey: ['tasks', id],
-        queryFn: () => taskApi.list(id!),
-        enabled: !!id && activeTab === 'tasks',
-        refetchInterval: activeTab === 'tasks' ? 3000 : false,
+    // ── Pulse tab data: triggers ──
+    const { data: pulseTriggers = [], refetch: refetchTriggers } = useQuery({
+        queryKey: ['triggers', id],
+        queryFn: () => triggerApi.list(id!),
+        enabled: !!id && activeTab === 'pulse',
+        refetchInterval: activeTab === 'pulse' ? 5000 : false,
     });
+
+    // ── Pulse tab data: agenda.md ──
+    const { data: agendaFile } = useQuery({
+        queryKey: ['file', id, 'agenda.md'],
+        queryFn: () => fileApi.read(id!, 'agenda.md').catch(() => null),
+        enabled: !!id && activeTab === 'pulse',
+    });
+
+    // ── Pulse tab data: task_history.md ──
+    const { data: taskHistoryFile } = useQuery({
+        queryKey: ['file', id, 'task_history.md'],
+        queryFn: () => fileApi.read(id!, 'task_history.md').catch(() => null),
+        enabled: !!id && activeTab === 'pulse',
+    });
+
+    // ── Pulse tab state ──
+    const [pulseSection, setPulseSection] = useState<'agenda' | 'triggers' | 'monologue' | 'history'>('agenda');
 
     const { data: soulContent } = useQuery({
         queryKey: ['file', id, 'soul.md'],
@@ -694,25 +712,34 @@ export default function AgentDetail() {
     }, [agent]);
 
     // Load chat history + connect websocket when chat tab is active
+    const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
     const parseChatMsg = (msg: ChatMsg): ChatMsg => {
         if (msg.role !== 'user') return msg;
+        let parsed = { ...msg };
         // Standard web chat format: [file:name.pdf]\ncontent
         const newFmt = msg.content.match(/^\[file:([^\]]+)\]\n?/);
-        if (newFmt) return { ...msg, fileName: newFmt[1], content: msg.content.slice(newFmt[0].length).trim() };
-        // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
-        const chanFmt = msg.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
+        if (newFmt) { parsed = { ...msg, fileName: newFmt[1], content: msg.content.slice(newFmt[0].length).trim() }; }
+        // Feishu/Slack channel format: [文件已上传: workspace/uploads/name]
+        const chanFmt = !newFmt && msg.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
         if (chanFmt) {
             const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
-            return { ...msg, fileName, content: msg.content.slice(chanFmt[0].length).trim() };
+            parsed = { ...msg, fileName, content: msg.content.slice(chanFmt[0].length).trim() };
         }
         // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
-        const oldFmt = msg.content.match(/^\[File: ([^\]]+)\]/);
+        const oldFmt = !newFmt && !chanFmt && msg.content.match(/^\[File: ([^\]]+)\]/);
         if (oldFmt) {
             const fileName = oldFmt[1];
             const qMatch = msg.content.match(/\nQuestion: ([\s\S]+)$/);
-            return { ...msg, fileName, content: qMatch ? qMatch[1].trim() : '' };
+            parsed = { ...msg, fileName, content: qMatch ? qMatch[1].trim() : '' };
         }
-        return msg;
+        // If file is an image and no imageUrl yet, build download URL for preview
+        if (parsed.fileName && !parsed.imageUrl && id) {
+            const ext = parsed.fileName.split('.').pop()?.toLowerCase() || '';
+            if (IMAGE_EXTS.includes(ext)) {
+                parsed.imageUrl = `/api/agents/${id}/files/download?path=workspace/uploads/${encodeURIComponent(parsed.fileName)}&token=${token}`;
+            }
+        }
+        return parsed;
     };
 
 
@@ -886,6 +913,32 @@ export default function AgentDetail() {
             if (!resp.ok) { const err = await resp.json(); alert(err.detail || t('agent.upload.failed')); return; }
             const data = await resp.json(); setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined });
         } catch (err) { alert(t('agent.upload.failed')); } finally { setUploading(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
+    };
+
+    // Clipboard paste handler — auto-upload pasted images
+    const handlePaste = async (e: React.ClipboardEvent) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.startsWith('image/')) {
+                e.preventDefault();
+                const blob = items[i].getAsFile();
+                if (!blob) return;
+                // Generate a filename from timestamp
+                const ext = blob.type.split('/')[1] || 'png';
+                const fileName = `paste-${Date.now()}.${ext}`;
+                const file = new File([blob], fileName, { type: blob.type });
+                setUploading(true);
+                try {
+                    const fd = new FormData(); fd.append('file', file); if (id) fd.append('agent_id', id);
+                    const resp = await fetch('/api/chat/upload', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd });
+                    if (!resp.ok) { const err = await resp.json(); alert(err.detail || t('agent.upload.failed')); return; }
+                    const data = await resp.json();
+                    setAttachedFile({ name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined });
+                } catch (err) { alert(t('agent.upload.failed')); } finally { setUploading(false); }
+                return; // Only handle the first image
+            }
+        }
     };
 
     // Expandable activity log
@@ -1380,968 +1433,824 @@ export default function AgentDetail() {
                             {/* Quick Actions */}
                             <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
                                 <button className="btn btn-secondary" onClick={() => setActiveTab('chat')}>💬 {t('agent.actions.chat')}</button>
-                                <button className="btn btn-secondary" onClick={() => setActiveTab('tasks')}>📋 {t('agent.tabs.tasks')}</button>
+                                <button className="btn btn-secondary" onClick={() => setActiveTab('pulse')}>⚡ Pulse</button>
                                 <button className="btn btn-secondary" onClick={() => setActiveTab('settings')}>⚙️ {t('agent.tabs.settings')}</button>
                             </div>
                         </div>
                     );
                 })()}
 
-                {/* ── Tasks Tab ── */}
-                {activeTab === 'tasks' && (
+                {/* ── Pulse Tab ── */}
+                {activeTab === 'pulse' && (
                     <div>
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginBottom: '12px' }}>
-                            <button className="btn btn-secondary" onClick={() => { setShowScheduleForm(!showScheduleForm); setShowTaskForm(false); }} style={{ fontSize: '13px' }}>{t('agent.tasks.addSchedule')}</button>
-                            <button className="btn btn-primary" onClick={() => { setShowTaskForm(!showTaskForm); setShowScheduleForm(false); }}>+ {t('agent.tasks.newTask')}</button>
+                        {/* Sub-navigation */}
+                        <div style={{ display: 'flex', gap: '2px', marginBottom: '16px', background: 'var(--bg-secondary)', borderRadius: '8px', padding: '3px' }}>
+                            {(['agenda', 'triggers', 'monologue', 'history'] as const).map(sec => (
+                                <button key={sec} onClick={() => setPulseSection(sec)} style={{
+                                    flex: 1, padding: '8px 12px', borderRadius: '6px', border: 'none',
+                                    background: pulseSection === sec ? 'var(--accent-primary)' : 'transparent',
+                                    color: pulseSection === sec ? '#fff' : 'var(--text-secondary)',
+                                    fontSize: '13px', fontWeight: 600, cursor: 'pointer', transition: 'all .2s',
+                                }}>
+                                    {sec === 'agenda' ? `📋 ${t('agent.pulse.agenda')}` : sec === 'triggers' ? `⚡ ${t('agent.pulse.triggers')}` : sec === 'monologue' ? `🤖 ${t('agent.pulse.monologue')}` : `📜 ${t('agent.pulse.history')}`}
+                                </button>
+                            ))}
                         </div>
-                        {showTaskForm && (
-                            <div className="card" style={{ marginBottom: '16px' }}>
-                                <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                                    <button className={`btn ${taskForm.type === 'todo' ? 'btn-primary' : 'btn-secondary'}`} style={{ fontSize: '12px' }} onClick={() => setTaskForm({ ...taskForm, type: 'todo' })}>
-                                        📋 {t('agent.tasks.typeTask', 'Task')}
-                                    </button>
-                                    <button className={`btn ${taskForm.type === 'supervision' ? 'btn-primary' : 'btn-secondary'}`} style={{ fontSize: '12px' }} onClick={() => setTaskForm({ ...taskForm, type: 'supervision', remind_schedule: taskForm.remind_schedule || JSON.stringify({ freq: 'daily', interval: 1, time: '09:00', weekdays: [1, 2, 3, 4, 5] }) })}>
-                                        📣 {t('agent.tasks.typeSupervision', 'Supervision')}
-                                    </button>
-                                </div>
-                                <div className="form-group">
-                                    <input className="form-input" placeholder={taskForm.type === 'supervision' ? t('agent.tasks.supervisionTitle', 'What to follow up on...') : t("agent.tasks.taskTitle")} value={taskForm.title} onChange={e => setTaskForm({ ...taskForm, title: e.target.value })} />
-                                </div>
-                                <div className="form-group">
-                                    <textarea className="form-textarea" placeholder={t("agent.tasks.taskDesc")} rows={2} value={taskForm.description} onChange={e => setTaskForm({ ...taskForm, description: e.target.value })} />
-                                </div>
-                                {taskForm.type === 'supervision' && (() => {
-                                    const defaults = { freq: 'daily', interval: 1, time: '09:00', weekdays: [1, 2, 3, 4, 5] };
-                                    const sched = (() => {
-                                        try { const p = JSON.parse(taskForm.remind_schedule || '{}'); return p.freq ? p : defaults; } catch { return defaults; }
-                                    })();
-                                    const updateSched = (patch: any) => {
-                                        const next = { ...defaults, ...sched, ...patch };
-                                        setTaskForm(f => ({ ...f, remind_schedule: JSON.stringify(next) }));
-                                    };
-                                    const freq = sched.freq || 'daily';
-                                    const interval = sched.interval || 1;
-                                    const time = sched.time || '09:00';
-                                    const weekdays: number[] = sched.weekdays || [1, 2, 3, 4, 5];
-                                    const DAY_LABELS = [t('agent.tasks.sun', '日'), t('agent.tasks.mon', '一'), t('agent.tasks.tue', '二'), t('agent.tasks.wed', '三'), t('agent.tasks.thu', '四'), t('agent.tasks.fri', '五'), t('agent.tasks.sat', '六')];
 
-                                    return (
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '12px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
-                                            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                                                📣 {t('agent.tasks.supervisionConfig', 'Supervision Settings')}
-                                            </div>
-                                            <input className="form-input" placeholder={t('agent.tasks.targetPerson', 'Target person name')} value={taskForm.supervision_target_name} onChange={e => setTaskForm({ ...taskForm, supervision_target_name: e.target.value })} />
-
-                                            {/* Frequency row */}
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                                                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('agent.tasks.repeatFreq', '重复频率')}:</span>
-                                                <span style={{ fontSize: '12px' }}>{t('agent.tasks.every', '每')}</span>
-                                                <select className="form-input" value={interval} onChange={e => updateSched({ interval: Number(e.target.value) })} style={{ width: '56px', fontSize: '12px', padding: '4px 6px' }}>
-                                                    {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
-                                                </select>
-                                                <select className="form-input" value={freq} onChange={e => updateSched({ freq: e.target.value })} style={{ width: '64px', fontSize: '12px', padding: '4px 6px' }}>
-                                                    <option value="daily">{t('agent.tasks.day', '天')}</option>
-                                                    <option value="weekly">{t('agent.tasks.week', '周')}</option>
-                                                </select>
-                                            </div>
-
-                                            {/* Weekday selector — only for weekly */}
-                                            {freq === 'weekly' && (
-                                                <div style={{ display: 'flex', gap: '4px' }}>
-                                                    {DAY_LABELS.map((label, idx) => {
-                                                        const active = weekdays.includes(idx);
-                                                        return (
-                                                            <button key={idx}
-                                                                onClick={() => {
-                                                                    const next = active ? weekdays.filter((d: number) => d !== idx) : [...weekdays, idx].sort();
-                                                                    if (next.length > 0) updateSched({ weekdays: next });
-                                                                }}
-                                                                style={{
-                                                                    width: '32px', height: '32px', borderRadius: '50%',
-                                                                    border: active ? '2px solid var(--accent-primary)' : '2px solid #999',
-                                                                    fontSize: '12px', fontWeight: 600, cursor: 'pointer',
-                                                                    background: active ? 'var(--accent-primary)' : '#fff',
-                                                                    color: active ? '#fff' : '#333',
-                                                                    lineHeight: '28px', textAlign: 'center' as const, padding: 0,
-                                                                }}>
-                                                                {label}
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-
-                                            {/* Time picker */}
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('agent.tasks.remindTime', '提醒时间')}:</span>
-                                                <input type="time" className="form-input" value={time} onChange={e => updateSched({ time: e.target.value })} style={{ width: '110px', fontSize: '12px', padding: '4px 6px' }} />
-                                            </div>
-
-                                            {/* Deadline */}
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('agent.tasks.deadline', '截止时间')}:</span>
-                                                <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                    <input type="radio" name="sv-deadline" checked={!taskForm.due_date} onChange={() => setTaskForm(f => ({ ...f, due_date: '' }))} />
-                                                    {t('agent.tasks.noDeadline', '永不截止')}
-                                                </label>
-                                                <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                    <input type="radio" name="sv-deadline" checked={!!taskForm.due_date} onChange={() => setTaskForm(f => ({ ...f, due_date: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) }))} />
-                                                    {t('agent.tasks.setDeadline', '设置截止')}
-                                                </label>
-                                                {taskForm.due_date && (
-                                                    <input type="date" className="form-input" value={taskForm.due_date} onChange={e => setTaskForm(f => ({ ...f, due_date: e.target.value }))} style={{ width: '150px', fontSize: '12px', padding: '4px 6px' }} />
-                                                )}
-                                            </div>
-                                        </div>
-                                    );
-                                })()}
-                                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                                    <button className="btn btn-secondary" onClick={() => setShowTaskForm(false)}>{t('common.cancel')}</button>
-                                    <button className="btn btn-primary" onClick={() => createTask.mutate(taskForm)} disabled={!taskForm.title || (taskForm.type === 'supervision' && !taskForm.supervision_target_name)}>{t('layout.create')}</button>
-                                </div>
-                            </div>
-                        )}
-                        {showScheduleForm && (() => {
-                            const sDefs = { freq: 'daily', interval: 1, time: '09:00', weekdays: [1, 2, 3, 4, 5] };
-                            const sSched = (() => { try { const p = JSON.parse(schedForm.schedule || '{}'); return p.freq ? p : sDefs; } catch { return sDefs; } })();
-                            const sUpdate = (patch: any) => { const next = { ...sDefs, ...sSched, ...patch }; setSchedForm(f => ({ ...f, schedule: JSON.stringify(next) })); };
-                            const sFreq = sSched.freq || 'daily';
-                            const sInterval = sSched.interval || 1;
-                            const sTime = sSched.time || '09:00';
-                            const sWeekdays: number[] = sSched.weekdays || [1, 2, 3, 4, 5];
-                            const DAY_LABELS_S = [t('agent.tasks.sun', '日'), t('agent.tasks.mon', '一'), t('agent.tasks.tue', '二'), t('agent.tasks.wed', '三'), t('agent.tasks.thu', '四'), t('agent.tasks.fri', '五'), t('agent.tasks.sat', '六')];
+                        {/* AGENDA section */}
+                        {pulseSection === 'agenda' && (() => {
+                            const raw = agendaFile?.content || '';
+                            const lines = raw.split('\n');
+                            const items = lines.filter((l: string) => /^\s*-\s*\[/.test(l)).map((l: string, i: number) => {
+                                const done = /\[x\]/i.test(l);
+                                const inProgress = /\[\//.test(l);
+                                const text = l.replace(/^\s*-\s*\[.\]\s*/, '').trim();
+                                return { id: i, text, done, inProgress };
+                            });
+                            // Active triggers as fallback agenda items
+                            const activeTriggers = pulseTriggers.filter((trig: any) => trig.is_enabled);
+                            const hasAgenda = items.length > 0;
+                            const hasActiveTriggers = activeTriggers.length > 0;
                             return (
-                                <div className="card" style={{ padding: '16px', marginBottom: '16px' }}>
-                                    <h4 style={{ marginBottom: '12px', fontSize: '14px' }}>{t('agent.tasks.addSchedule')}</h4>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                        <input className="input" placeholder={t("agent.tasks.taskTitle")} value={schedForm.name}
-                                            onChange={e => setSchedForm(p => ({ ...p, name: e.target.value }))} />
-                                        <textarea className="input" placeholder={t("agent.tasks.taskDesc")} rows={3} value={schedForm.instruction}
-                                            onChange={e => setSchedForm(p => ({ ...p, instruction: e.target.value }))} style={{ resize: 'vertical' }} />
-
-                                        {/* Rich schedule picker */}
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                                                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('agent.tasks.repeatFreq', '重复频率')}:</span>
-                                                <span style={{ fontSize: '12px' }}>{t('agent.tasks.every', '每')}</span>
-                                                <select className="form-input" value={sInterval} onChange={e => sUpdate({ interval: Number(e.target.value) })} style={{ width: '56px', fontSize: '12px', padding: '4px 6px' }}>
-                                                    {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}</option>)}
-                                                </select>
-                                                <select className="form-input" value={sFreq} onChange={e => sUpdate({ freq: e.target.value })} style={{ width: '64px', fontSize: '12px', padding: '4px 6px' }}>
-                                                    <option value="daily">{t('agent.tasks.day', '天')}</option>
-                                                    <option value="weekly">{t('agent.tasks.week', '周')}</option>
-                                                </select>
-                                            </div>
-                                            {sFreq === 'weekly' && (
-                                                <div style={{ display: 'flex', gap: '4px' }}>
-                                                    {DAY_LABELS_S.map((label, idx) => {
-                                                        const active = sWeekdays.includes(idx);
-                                                        return (
-                                                            <button key={idx} onClick={() => { const next = active ? sWeekdays.filter((d: number) => d !== idx) : [...sWeekdays, idx].sort(); if (next.length > 0) sUpdate({ weekdays: next }); }}
-                                                                style={{ width: '32px', height: '32px', borderRadius: '50%', border: active ? '2px solid var(--accent-primary)' : '2px solid #999', fontSize: '12px', fontWeight: 600, cursor: 'pointer', background: active ? 'var(--accent-primary)' : '#fff', color: active ? '#fff' : '#333', lineHeight: '28px', textAlign: 'center' as const, padding: 0 }}>
-                                                                {label}
-                                                            </button>
-                                                        );
-                                                    })}
+                                <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                        <h4 style={{ margin: 0 }}>📋 {t('agent.pulse.agenda')}</h4>
+                                        <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.pulse.agendaDesc')}</span>
+                                    </div>
+                                    {/* Agenda items from agenda.md */}
+                                    {hasAgenda && (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: hasActiveTriggers ? '16px' : '0' }}>
+                                            {items.map((it: any) => (
+                                                <div key={it.id} className="card" style={{
+                                                    padding: '10px 14px', display: 'flex', alignItems: 'center', gap: '10px',
+                                                    opacity: it.done ? 0.5 : 1,
+                                                    borderLeft: it.inProgress ? '3px solid var(--accent-primary)' : it.done ? '3px solid var(--success)' : '3px solid var(--border-subtle)',
+                                                }}>
+                                                    <span style={{ fontSize: '16px' }}>{it.done ? '✅' : it.inProgress ? '🔄' : '⬜'}</span>
+                                                    <span style={{ fontSize: '13px', textDecoration: it.done ? 'line-through' : 'none' }}>{it.text}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {/* Active triggers shown as scheduled items */}
+                                    {hasActiveTriggers && (
+                                        <div>
+                                            {hasAgenda && (
+                                                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <span>⏰</span> {t('agent.pulse.scheduledTriggers', 'Scheduled Triggers')}
                                                 </div>
                                             )}
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('agent.tasks.remindTime', '执行时间')}:</span>
-                                                <input type="time" className="form-input" value={sTime} onChange={e => sUpdate({ time: e.target.value })} style={{ width: '110px', fontSize: '12px', padding: '4px 6px' }} />
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                {activeTriggers.map((trig: any) => (
+                                                    <div key={trig.id} className="card" style={{
+                                                        padding: '10px 14px', display: 'flex', alignItems: 'center', gap: '10px',
+                                                        borderLeft: `3px solid ${trig.type === 'cron' ? '#7c3aed' : trig.type === 'once' ? '#059669' : trig.type === 'interval' ? '#0284c7' : trig.type === 'poll' ? '#ea580c' : '#db2777'}`,
+                                                    }}>
+                                                        <span style={{ fontSize: '16px' }}>⏰</span>
+                                                        <div style={{ flex: 1 }}>
+                                                            <div style={{ fontSize: '13px', fontWeight: 500 }}>{trig.name}</div>
+                                                            {trig.reason && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{trig.reason}</div>}
+                                                        </div>
+                                                        <span style={{
+                                                            fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
+                                                            background: trig.type === 'cron' ? '#ede9fe' : trig.type === 'once' ? '#d1fae5' : trig.type === 'interval' ? '#dbeafe' : trig.type === 'poll' ? '#ffedd5' : '#fce7f3',
+                                                            color: trig.type === 'cron' ? '#7c3aed' : trig.type === 'once' ? '#059669' : trig.type === 'interval' ? '#0284c7' : trig.type === 'poll' ? '#ea580c' : '#db2777',
+                                                            fontWeight: 600,
+                                                        }}>{trig.type}</span>
+                                                    </div>
+                                                ))}
                                             </div>
                                         </div>
-
-                                        {/* Deadline */}
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{t('agent.tasks.deadline', '截止时间')}:</span>
-                                            <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                <input type="radio" name="sched-deadline" checked={!schedForm.due_date} onChange={() => setSchedForm(f => ({ ...f, due_date: '' }))} />
-                                                {t('agent.tasks.noDeadline', '永不截止')}
-                                            </label>
-                                            <label style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                <input type="radio" name="sched-deadline" checked={!!schedForm.due_date} onChange={() => setSchedForm(f => ({ ...f, due_date: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10) }))} />
-                                                {t('agent.tasks.setDeadline', '设置截止')}
-                                            </label>
-                                            {schedForm.due_date && (
-                                                <input type="date" className="form-input" value={schedForm.due_date} onChange={e => setSchedForm(f => ({ ...f, due_date: e.target.value }))} style={{ width: '150px', fontSize: '12px', padding: '4px 6px' }} />
-                                            )}
+                                    )}
+                                    {/* Empty state only when BOTH are empty */}
+                                    {!hasAgenda && !hasActiveTriggers && (
+                                        <div className="card" style={{ padding: '32px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                                            {t('agent.pulse.agendaEmpty')}
                                         </div>
-
-                                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                                            <button className="btn btn-secondary" onClick={() => setShowScheduleForm(false)}>{t('common.cancel')}</button>
-                                            <button className="btn btn-primary" disabled={!schedForm.name || createScheduleMut.isPending}
-                                                onClick={() => createScheduleMut.mutate()}>
-                                                {createScheduleMut.isPending ? '⏳ Saving...' : t('agent.tasks.addSchedule')}
-                                            </button>
-                                        </div>
-                                    </div>
+                                    )}
+                                    {/* Raw markdown */}
+                                    {raw && (
+                                        <details style={{ marginTop: '12px' }}>
+                                            <summary style={{ fontSize: '11px', color: 'var(--text-tertiary)', cursor: 'pointer' }}>{t('agent.pulse.viewRawMarkdown')}</summary>
+                                            <pre style={{ fontSize: '11px', marginTop: '8px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '6px', whiteSpace: 'pre-wrap', maxHeight: '300px', overflow: 'auto' }}>{raw}</pre>
+                                        </details>
+                                    )}
                                 </div>
                             );
                         })()}
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
-                            {['pending', 'doing', 'supervision', 'done'].map((col) => {
-                                const colTasks = tasks.filter(t => col === 'supervision' ? t.type === 'supervision' : (t.type !== 'supervision' && t.status === col));
-                                const pendingCount = col === 'pending' ? colTasks.length + schedules.length : colTasks.length;
-                                return (
-                                    <div key={col} style={{ background: 'var(--bg-secondary)', borderRadius: '8px', padding: '10px', minHeight: '200px' }}>
-                                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', marginBottom: '10px', padding: '4px 0', borderBottom: '1px solid var(--border-subtle)' }}>
-                                            {col === 'pending' ? t('agent.tasks.todo') : col === 'doing' ? t('agent.tasks.doing') : col === 'supervision' ? t('agent.tasks.supervision') : t('agent.tasks.done')}
-                                            <span style={{ marginLeft: '6px', background: 'var(--bg-elevated)', borderRadius: '8px', padding: '1px 6px', fontSize: '10px' }}>
-                                                {pendingCount}
-                                            </span>
-                                        </div>
 
 
-                                        {col === 'pending' && (
-                                            <>
-                                                {/* Tasks */}
-                                                {colTasks.length > 0 && (
-                                                    <div style={{ marginBottom: '12px' }}>
-                                                        <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px', padding: '2px 0' }}>Tasks</div>
-                                                        {colTasks.map(task => (
-                                                            <div key={task.id} className="card" style={{ marginBottom: '6px', padding: '10px 12px', cursor: 'pointer', border: selectedTaskId === task.id ? '1px solid var(--accent-primary)' : '1px solid transparent' }} onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}>
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
-                                                                    <span style={{ fontSize: '12px', fontWeight: 500, flex: 1 }}>{task.title}</span>
-                                                                    {task.creator_username && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', borderRadius: '4px', padding: '1px 5px' }}>@{task.creator_username}</span>}
-                                                                </div>
-                                                                <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
-                                                                    <span className={`badge badge-${task.priority === 'high' || task.priority === 'urgent' ? 'error' : 'info'}`} style={{ fontSize: '10px' }}>
-                                                                        {task.priority}
-                                                                    </span>
-                                                                </div>
-                                                                {selectedTaskId === task.id && taskLogs.length > 0 && (
-                                                                    <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px' }}>
-                                                                        <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px' }}>Execution History</div>
-                                                                        {taskLogs.map(log => (
-                                                                            <div key={log.id} style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
-                                                                                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px' }}>
-                                                                                    {new Date(log.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                                                                </div>
-                                                                                {log.content}
-                                                                            </div>
-                                                                        ))}
-                                                                    </div>
-                                                                )}
-                                                                {selectedTaskId === task.id && taskLogs.length === 0 && (
-                                                                    <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>No execution history</div>
-                                                                )}
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
-
-
-                                                <div>
-                                                    <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px', padding: '2px 0' }}>Scheduled</div>
-                                                    {schedules.length > 0 ? schedules.map((s: any) => {
-                                                        const formatDt = (iso: string) => !iso ? '-' : new Date(iso).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                                                        const isExpanded = selectedTaskId === `sched-${s.id}`;
-                                                        return (
-                                                            <div key={s.id} className="card" style={{ marginBottom: '6px', padding: '10px 12px', borderLeft: `3px solid ${s.is_enabled ? 'var(--accent-primary)' : 'var(--text-tertiary)'}`, opacity: s.is_enabled ? 1 : 0.6 }}>
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                                                                    <span style={{ fontSize: '13px' }}>{s.is_enabled ? '⏰' : '⏸'}</span>
-                                                                    <span style={{ fontWeight: 500, fontSize: '12px', flex: 1 }}>{s.name}</span>
-                                                                    {s.creator_username && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', borderRadius: '4px', padding: '1px 5px' }}>@{s.creator_username}</span>}
-                                                                </div>
-                                                                {s.instruction && (
-                                                                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '4px', lineHeight: 1.4, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>
-                                                                        {s.instruction}
-                                                                    </div>
-                                                                )}
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginBottom: '6px' }}>
-                                                                    <code style={{ fontSize: '10px', background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: '3px', color: 'var(--text-secondary)' }}>{s.cron_expr}</code>
-                                                                    {s.next_run_at && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>Next: {formatDt(s.next_run_at)}</span>}
-                                                                    {s.run_count > 0 && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>· {s.run_count}x</span>}
-                                                                    {s.last_run_at && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>Last: {formatDt(s.last_run_at)}</span>}
-                                                                </div>
-                                                                <div style={{ display: 'flex', gap: '2px', alignItems: 'center' }}>
-                                                                    <button className="btn btn-ghost" title={t('agent.tasks.triggerNow', 'Run Now')} style={{ padding: '3px 5px', lineHeight: 1 }}
-                                                                        onClick={() => triggerScheduleMut.mutate(s.id)}>
-                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                                                    </button>
-                                                                    <button className="btn btn-ghost" title={s.is_enabled ? t('common.pause', 'Pause') : t('common.resume', 'Resume')} style={{ padding: '3px 5px', lineHeight: 1 }}
-                                                                        onClick={() => toggleScheduleMut.mutate({ sid: s.id, enabled: !s.is_enabled })}>
-                                                                        {s.is_enabled
-                                                                            ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
-                                                                            : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>}
-                                                                    </button>
-                                                                    <button className="btn btn-ghost" title={t('common.delete')} style={{ padding: '3px 5px', lineHeight: 1, color: 'var(--error)' }}
-                                                                        onClick={() => { if (confirm(`Delete ${s.name}?`)) deleteScheduleMut.mutate(s.id); }}>
-                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
-                                                                    </button>
-                                                                    <div style={{ flex: 1 }} />
-                                                                    <button className="btn btn-ghost" title="History" style={{ padding: '3px 5px', lineHeight: 1, fontSize: '10px', color: 'var(--text-tertiary)' }}
-                                                                        onClick={() => setSelectedTaskId(isExpanded ? null : `sched-${s.id}`)}>
-                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
-                                                                    </button>
-                                                                </div>
-                                                                {isExpanded && (
-                                                                    <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px' }}>
-                                                                        <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px' }}>Execution History</div>
-                                                                        {scheduleHistoryData && scheduleHistoryData.length > 0 ? scheduleHistoryData.map((h: any) => (
-                                                                            <div key={h.id} style={{ marginBottom: '8px', padding: '6px 8px', background: 'var(--bg-tertiary)', borderRadius: '6px' }}>
-                                                                                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '3px' }}>
-                                                                                    {new Date(h.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                                                                </div>
-                                                                                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', lineHeight: 1.4, maxHeight: '120px', overflow: 'auto' }}>
-                                                                                    {h.reply || h.summary || 'No result recorded'}
-                                                                                </div>
-                                                                            </div>
-                                                                        )) : <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>No execution history yet</div>}
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    }) : <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', padding: '8px', textAlign: 'center' }}>No schedules</div>}
+                        {/* TRIGGERS section */}
+                        {pulseSection === 'triggers' && (
+                            <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                    <h4 style={{ margin: 0 }}>⚡ {t('agent.pulse.triggers')}</h4>
+                                    <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.pulse.triggersDesc')}</span>
+                                </div>
+                                {pulseTriggers.length === 0 ? (
+                                    <div className="card" style={{ padding: '32px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                                        {t('agent.pulse.triggersEmpty')}
+                                    </div>
+                                ) : (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                        {pulseTriggers.map((trig: any) => (
+                                            <div key={trig.id} className="card" style={{
+                                                padding: '12px 16px',
+                                                opacity: trig.is_enabled ? 1 : 0.5,
+                                                borderLeft: `3px solid ${trig.is_enabled ? (trig.type === 'cron' ? '#7c3aed' : trig.type === 'once' ? '#059669' : trig.type === 'interval' ? '#0284c7' : trig.type === 'poll' ? '#ea580c' : '#db2777') : '#999'}`,
+                                            }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                                                    <span style={{ fontWeight: 600, fontSize: '13px' }}>{trig.name}</span>
+                                                    <span style={{
+                                                        fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
+                                                        background: trig.type === 'cron' ? '#ede9fe' : trig.type === 'once' ? '#d1fae5' : trig.type === 'interval' ? '#dbeafe' : trig.type === 'poll' ? '#ffedd5' : '#fce7f3',
+                                                        color: trig.type === 'cron' ? '#7c3aed' : trig.type === 'once' ? '#059669' : trig.type === 'interval' ? '#0284c7' : trig.type === 'poll' ? '#ea580c' : '#db2777',
+                                                        fontWeight: 600,
+                                                    }}>{trig.type}</span>
+                                                    {!trig.is_enabled && <span style={{ fontSize: '10px', color: '#999' }}>⏸ {t('agent.pulse.disabled')}</span>}
+                                                    <span style={{ marginLeft: 'auto', fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.pulse.fired', { count: trig.fire_count })}</span>
                                                 </div>
-                                            </>
-                                        )}
-
-
-                                        {col !== 'pending' && colTasks.map(task => (
-                                            <div key={task.id} className="card" style={{ marginBottom: '6px', padding: '10px 12px', cursor: 'pointer', border: selectedTaskId === task.id ? '1px solid var(--accent-primary)' : '1px solid transparent', opacity: task.status === 'paused' ? 0.6 : 1 }} onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
-                                                    <span style={{ fontSize: '12px', fontWeight: 500, flex: 1 }}>{task.title}</span>
-                                                    {task.creator_username && <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-tertiary)', borderRadius: '4px', padding: '1px 5px' }}>@{task.creator_username}</span>}
-                                                </div>
-                                                <div style={{ display: 'flex', gap: '4px', marginTop: '4px', flexWrap: 'wrap', alignItems: 'center' }}>
-                                                    <span className={`badge badge-${task.priority === 'high' || task.priority === 'urgent' ? 'error' : 'info'}`} style={{ fontSize: '10px' }}>
-                                                        {task.priority}
+                                                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>{trig.reason}</div>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                                                    <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', fontFamily: 'monospace' }}>
+                                                        {JSON.stringify(trig.config).substring(0, 80)}
                                                     </span>
-                                                    {task.status === 'doing' && <span className="badge" style={{ fontSize: '10px', background: 'var(--warning)' }}>In progress</span>}
-                                                    {task.status === 'paused' && <span className="badge" style={{ fontSize: '10px', background: 'var(--text-tertiary)' }}>⏸️ Paused</span>}
-                                                    {task.type === 'supervision' && task.supervision_target_name && (
-                                                        <span className="badge" style={{ fontSize: '10px', background: '#e8b4f8' }}>→ {task.supervision_target_name}</span>
-                                                    )}
-                                                    {task.type === 'supervision' && task.remind_schedule && (() => {
-                                                        try {
-                                                            const s = JSON.parse(task.remind_schedule);
-                                                            const dayNames = ['日', '一', '二', '三', '四', '五', '六'];
-                                                            let label = s.freq === 'weekly'
-                                                                ? `每${s.interval > 1 ? s.interval : ''}周 ${(s.weekdays || []).map((d: number) => dayNames[d]).join('')}`
-                                                                : `每${s.interval > 1 ? s.interval : ''}天`;
-                                                            return <span className="badge" style={{ fontSize: '10px', background: '#b4d8f8' }}>⏰ {label} {s.time || '09:00'}</span>;
-                                                        } catch {
-                                                            return <span className="badge" style={{ fontSize: '10px', background: '#b4d8f8' }}>⏰ {task.remind_schedule}</span>;
-                                                        }
-                                                    })()}
+                                                    <div style={{ display: 'flex', gap: '4px' }}>
+                                                        <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '11px' }}
+                                                            onClick={async () => {
+                                                                await triggerApi.update(id!, trig.id, { is_enabled: !trig.is_enabled });
+                                                                refetchTriggers();
+                                                            }}>
+                                                            {trig.is_enabled ? `⏸ ${t('agent.pulse.disable')}` : `▶️ ${t('agent.pulse.enable')}`}
+                                                        </button>
+                                                        <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--error)' }}
+                                                            onClick={async () => {
+                                                                if (confirm(t('agent.pulse.deleteTriggerConfirm', { name: trig.name }))) {
+                                                                    await triggerApi.delete(id!, trig.id);
+                                                                    refetchTriggers();
+                                                                }
+                                                            }}>
+                                                            🗑
+                                                        </button>
+                                                    </div>
                                                 </div>
-                                                {/* Supervision action buttons */}
-                                                {task.type === 'supervision' && task.status !== 'done' && (
-                                                    <div style={{ display: 'flex', gap: '2px', marginTop: '6px' }} onClick={e => e.stopPropagation()}>
-                                                        <button className="btn btn-ghost" title={t('agent.tasks.triggerNow', 'Run Now')} style={{ padding: '3px 5px', lineHeight: 1 }}
-                                                            onClick={async () => {
-                                                                await taskApi.trigger(id!, task.id);
-                                                                queryClient.invalidateQueries({ queryKey: ['tasks', id] });
-                                                                showToast('✅ Task triggered', 'success');
-                                                            }}>
-                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                                        </button>
-                                                        <button className="btn btn-ghost" title={task.status === 'paused' ? t('common.resume', 'Resume') : t('common.pause', 'Pause')} style={{ padding: '3px 5px', lineHeight: 1 }}
-                                                            onClick={async () => {
-                                                                await taskApi.update(id!, task.id, { status: task.status === 'paused' ? 'pending' : 'paused' } as any);
-                                                                queryClient.invalidateQueries({ queryKey: ['tasks', id] });
-                                                            }}>
-                                                            {task.status === 'paused'
-                                                                ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                                                                : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>}
-                                                        </button>
-                                                        <button className="btn btn-ghost" title={t('agent.tasks.markDone', 'Mark Done')} style={{ padding: '3px 5px', lineHeight: 1, color: 'var(--success)' }}
-                                                            onClick={async () => {
-                                                                await taskApi.update(id!, task.id, { status: 'done' } as any);
-                                                                queryClient.invalidateQueries({ queryKey: ['tasks', id] });
-                                                            }}>
-                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-                                                        </button>
-                                                    </div>
-                                                )}
-                                                {selectedTaskId === task.id && taskLogs.length > 0 && (
-                                                    <div style={{ marginTop: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '8px' }}>
-                                                        <div style={{ fontSize: '10px', fontWeight: 600, color: 'var(--text-tertiary)', marginBottom: '6px' }}>Execution History</div>
-                                                        {taskLogs.map(log => (
-                                                            <div key={log.id} style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
-                                                                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px' }}>
-                                                                    {new Date(log.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                                                </div>
-                                                                {log.content}
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                                {selectedTaskId === task.id && taskLogs.length === 0 && (
-                                                    <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--text-tertiary)' }}>No execution history</div>
-                                                )}
                                             </div>
                                         ))}
+
                                     </div>
-                                );
-                            })}
-                        </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* INNER MONOLOGUE section */}
+                        {pulseSection === 'monologue' && (() => {
+                            // Filter activity logs for trigger-related entries
+                            const triggerLogs = activityLogs.filter((log: any) =>
+                                log.action_type === 'trigger_fired' || log.action_type === 'trigger_created' ||
+                                log.action_type === 'trigger_updated' || log.action_type === 'trigger_cancelled' ||
+                                log.summary?.includes('内心独白') || log.summary?.includes('trigger')
+                            );
+                            return (
+                                <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                        <h4 style={{ margin: 0 }}>🤖 {t('agent.pulse.monologue')}</h4>
+                                        <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.pulse.monologueDesc')}</span>
+                                    </div>
+                                    {triggerLogs.length === 0 ? (
+                                        <div className="card" style={{ padding: '32px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                                            {t('agent.pulse.monologueEmpty')}
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                            {triggerLogs.slice(0, 30).map((log: any) => (
+                                                <div key={log.id} className="card" style={{ padding: '10px 14px' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                                                        <span style={{
+                                                            fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
+                                                            background: log.action_type === 'trigger_fired' ? '#fce7f3' : '#e0f2fe',
+                                                            color: log.action_type === 'trigger_fired' ? '#db2777' : '#0284c7',
+                                                            fontWeight: 600,
+                                                        }}>{log.action_type}</span>
+                                                        <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                            {new Date(log.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                                        </span>
+                                                    </div>
+                                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>{log.summary}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
+
+                        {/* TASK HISTORY section */}
+                        {pulseSection === 'history' && (() => {
+                            const histRaw = taskHistoryFile?.content || '';
+                            return (
+                                <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                        <h4 style={{ margin: 0 }}>📜 {t('agent.pulse.historyTitle')}</h4>
+                                        <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.pulse.historyDesc')}</span>
+                                    </div>
+                                    {!histRaw ? (
+                                        <div className="card" style={{ padding: '32px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                                            {t('agent.pulse.historyEmpty')}
+                                        </div>
+                                    ) : (
+                                        <div className="card" style={{ padding: '16px' }}>
+                                            <MarkdownRenderer content={histRaw} />
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
                     </div>
                 )}
+
 
                 {/* ── Mind Tab (Soul + Memory + Heartbeat) ── */}
-                {activeTab === 'mind' && (() => {
-                    const adapter: FileBrowserApi = {
-                        list: (p) => fileApi.list(id!, p),
-                        read: (p) => fileApi.read(id!, p),
-                        write: (p, c) => fileApi.write(id!, p, c),
-                        delete: (p) => fileApi.delete(id!, p),
-                    };
-                    return (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                            {/* Soul Section */}
-                            <div>
-                                <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    🧬 {t('agent.soul.title')}
-                                </h3>
-                                <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                    {t('agent.mind.soulDesc', 'Core identity, personality, and behavior boundaries.')}
-                                </p>
-                                <FileBrowser api={adapter} singleFile="soul.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
-                            </div>
+                {
+                    activeTab === 'mind' && (() => {
+                        const adapter: FileBrowserApi = {
+                            list: (p) => fileApi.list(id!, p),
+                            read: (p) => fileApi.read(id!, p),
+                            write: (p, c) => fileApi.write(id!, p, c),
+                            delete: (p) => fileApi.delete(id!, p),
+                        };
+                        return (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                                {/* Soul Section */}
+                                <div>
+                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        🧬 {t('agent.soul.title')}
+                                    </h3>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                                        {t('agent.mind.soulDesc', 'Core identity, personality, and behavior boundaries.')}
+                                    </p>
+                                    <FileBrowser api={adapter} singleFile="soul.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
+                                </div>
 
-                            {/* Memory Section */}
-                            <div>
-                                <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    🧠 {t('agent.memory.title')}
-                                </h3>
-                                <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                    {t('agent.mind.memoryDesc', 'Persistent memory accumulated through conversations and experiences.')}
-                                </p>
-                                <FileBrowser api={adapter} rootPath="memory" readOnly features={{}} />
-                            </div>
+                                {/* Memory Section */}
+                                <div>
+                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        🧠 {t('agent.memory.title')}
+                                    </h3>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                                        {t('agent.mind.memoryDesc', 'Persistent memory accumulated through conversations and experiences.')}
+                                    </p>
+                                    <FileBrowser api={adapter} rootPath="memory" readOnly features={{}} />
+                                </div>
 
-                            {/* Heartbeat Section */}
-                            <div>
-                                <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    💓 {t('agent.mind.heartbeatTitle', 'Heartbeat')}
-                                </h3>
-                                <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                    {t('agent.mind.heartbeatDesc', 'Instructions for periodic awareness checks. The agent reads this file during each heartbeat.')}
-                                </p>
-                                <FileBrowser api={adapter} singleFile="HEARTBEAT.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
+                                {/* Heartbeat Section */}
+                                <div>
+                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        💓 {t('agent.mind.heartbeatTitle', 'Heartbeat')}
+                                    </h3>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                                        {t('agent.mind.heartbeatDesc', 'Instructions for periodic awareness checks. The agent reads this file during each heartbeat.')}
+                                    </p>
+                                    <FileBrowser api={adapter} singleFile="HEARTBEAT.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
+                                </div>
                             </div>
-                        </div>
-                    );
-                })()}
+                        );
+                    })()
+                }
 
                 {/* ── Tools Tab ── */}
-                {activeTab === 'tools' && (
-                    <div>
-                        <div style={{ marginBottom: '16px' }}>
-                            <h3 style={{ marginBottom: '4px' }}>{t('agent.toolMgmt.title')}</h3>
-                            <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.toolMgmt.description')}</p>
-                        </div>
-                        <ToolsManager agentId={id!} />
-                    </div>
-                )}
-
-                {/* ── Skills Tab ── */}
-                {activeTab === 'skills' && (() => {
-                    const adapter: FileBrowserApi = {
-                        list: (p) => fileApi.list(id!, p),
-                        read: (p) => fileApi.read(id!, p),
-                        write: (p, c) => fileApi.write(id!, p, c),
-                        delete: (p) => fileApi.delete(id!, p),
-                        upload: (file, path) => fileApi.upload(id!, file, path),
-                    };
-                    return (
+                {
+                    activeTab === 'tools' && (
                         <div>
                             <div style={{ marginBottom: '16px' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div>
-                                        <h3 style={{ marginBottom: '4px' }}>{t('agent.skills.title')}</h3>
-                                        <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.skills.description')}</p>
-                                    </div>
-                                    <button
-                                        className="btn btn-primary"
-                                        style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                                        onClick={() => setShowImportSkillModal(true)}
-                                    >
-                                        📦 {t('agent.skills.importPreset', 'Import from Presets')}
-                                    </button>
-                                </div>
-                                <div style={{ marginTop: '8px', padding: '10px 14px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                                    <strong>📁 Skill Format:</strong><br />
-                                    • <code>skills/my-skill/SKILL.md</code> — {t('agent.skills.folderFormat', 'Each skill is a folder with a SKILL.md file and optional auxiliary files (scripts/, examples/)')}
-                                </div>
+                                <h3 style={{ marginBottom: '4px' }}>{t('agent.toolMgmt.title')}</h3>
+                                <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.toolMgmt.description')}</p>
                             </div>
-                            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: true, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
+                            <ToolsManager agentId={id!} />
+                        </div>
+                    )
+                }
 
-                            {/* Import from Presets Modal */}
-                            {showImportSkillModal && (
-                                <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowImportSkillModal(false)}>
-                                    <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '600px', width: '90%', maxHeight: '70vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                                            <h3>📦 {t('agent.skills.importPreset', 'Import from Presets')}</h3>
-                                            <button onClick={() => setShowImportSkillModal(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>✕</button>
+                {/* ── Skills Tab ── */}
+                {
+                    activeTab === 'skills' && (() => {
+                        const adapter: FileBrowserApi = {
+                            list: (p) => fileApi.list(id!, p),
+                            read: (p) => fileApi.read(id!, p),
+                            write: (p, c) => fileApi.write(id!, p, c),
+                            delete: (p) => fileApi.delete(id!, p),
+                            upload: (file, path) => fileApi.upload(id!, file, path),
+                        };
+                        return (
+                            <div>
+                                <div style={{ marginBottom: '16px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <div>
+                                            <h3 style={{ marginBottom: '4px' }}>{t('agent.skills.title')}</h3>
+                                            <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.skills.description')}</p>
                                         </div>
-                                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px' }}>
-                                            {t('agent.skills.importDesc', 'Select a preset skill to import into this agent. All skill files will be copied to the agent\'s skills folder.')}
-                                        </p>
-                                        <div style={{ flex: 1, overflowY: 'auto' }}>
-                                            {!globalSkillsForImport ? (
-                                                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)' }}>Loading...</div>
-                                            ) : globalSkillsForImport.length === 0 ? (
-                                                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)' }}>No preset skills available</div>
-                                            ) : (
-                                                globalSkillsForImport.map((skill: any) => (
-                                                    <div
-                                                        key={skill.id}
-                                                        style={{
-                                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                            padding: '12px 14px', borderRadius: '8px', marginBottom: '8px',
-                                                            border: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)',
-                                                            transition: 'border-color 0.15s',
-                                                        }}
-                                                        onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--accent-primary)')}
-                                                        onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border-subtle)')}
-                                                    >
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
-                                                            <span style={{ fontSize: '20px' }}>{skill.icon || '📋'}</span>
-                                                            <div>
-                                                                <div style={{ fontWeight: 600, fontSize: '14px' }}>{skill.name}</div>
-                                                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                                    {skill.description?.substring(0, 100)}{skill.description?.length > 100 ? '...' : ''}
-                                                                </div>
-                                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                                    📁 {skill.folder_name}
-                                                                    {skill.is_default && <span style={{ marginLeft: '8px', color: 'var(--accent-primary)', fontWeight: 600 }}>✓ Default</span>}
+                                        <button
+                                            className="btn btn-primary"
+                                            style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                                            onClick={() => setShowImportSkillModal(true)}
+                                        >
+                                            📦 {t('agent.skills.importPreset', 'Import from Presets')}
+                                        </button>
+                                    </div>
+                                    <div style={{ marginTop: '8px', padding: '10px 14px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                                        <strong>📁 Skill Format:</strong><br />
+                                        • <code>skills/my-skill/SKILL.md</code> — {t('agent.skills.folderFormat', 'Each skill is a folder with a SKILL.md file and optional auxiliary files (scripts/, examples/)')}
+                                    </div>
+                                </div>
+                                <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: true, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
+
+                                {/* Import from Presets Modal */}
+                                {showImportSkillModal && (
+                                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowImportSkillModal(false)}>
+                                        <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '600px', width: '90%', maxHeight: '70vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                                <h3>📦 {t('agent.skills.importPreset', 'Import from Presets')}</h3>
+                                                <button onClick={() => setShowImportSkillModal(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>✕</button>
+                                            </div>
+                                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px' }}>
+                                                {t('agent.skills.importDesc', 'Select a preset skill to import into this agent. All skill files will be copied to the agent\'s skills folder.')}
+                                            </p>
+                                            <div style={{ flex: 1, overflowY: 'auto' }}>
+                                                {!globalSkillsForImport ? (
+                                                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)' }}>Loading...</div>
+                                                ) : globalSkillsForImport.length === 0 ? (
+                                                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)' }}>No preset skills available</div>
+                                                ) : (
+                                                    globalSkillsForImport.map((skill: any) => (
+                                                        <div
+                                                            key={skill.id}
+                                                            style={{
+                                                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                                                padding: '12px 14px', borderRadius: '8px', marginBottom: '8px',
+                                                                border: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)',
+                                                                transition: 'border-color 0.15s',
+                                                            }}
+                                                            onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--accent-primary)')}
+                                                            onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border-subtle)')}
+                                                        >
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
+                                                                <span style={{ fontSize: '20px' }}>{skill.icon || '📋'}</span>
+                                                                <div>
+                                                                    <div style={{ fontWeight: 600, fontSize: '14px' }}>{skill.name}</div>
+                                                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                                                                        {skill.description?.substring(0, 100)}{skill.description?.length > 100 ? '...' : ''}
+                                                                    </div>
+                                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                                                                        📁 {skill.folder_name}
+                                                                        {skill.is_default && <span style={{ marginLeft: '8px', color: 'var(--accent-primary)', fontWeight: 600 }}>✓ Default</span>}
+                                                                    </div>
                                                                 </div>
                                                             </div>
+                                                            <button
+                                                                className="btn btn-secondary"
+                                                                style={{ whiteSpace: 'nowrap', fontSize: '12px', padding: '6px 14px' }}
+                                                                disabled={importingSkillId === skill.id}
+                                                                onClick={async () => {
+                                                                    setImportingSkillId(skill.id);
+                                                                    try {
+                                                                        const res = await fileApi.importSkill(id!, skill.id);
+                                                                        alert(`✅ Imported "${skill.name}" (${res.files_written} files)`);
+                                                                        queryClient.invalidateQueries({ queryKey: ['files', id, 'skills'] });
+                                                                        setShowImportSkillModal(false);
+                                                                    } catch (err: any) {
+                                                                        alert(`❌ Import failed: ${err?.message || err}`);
+                                                                    } finally {
+                                                                        setImportingSkillId(null);
+                                                                    }
+                                                                }}
+                                                            >
+                                                                {importingSkillId === skill.id ? '⏳ ...' : '⬇️ Import'}
+                                                            </button>
                                                         </div>
-                                                        <button
-                                                            className="btn btn-secondary"
-                                                            style={{ whiteSpace: 'nowrap', fontSize: '12px', padding: '6px 14px' }}
-                                                            disabled={importingSkillId === skill.id}
-                                                            onClick={async () => {
-                                                                setImportingSkillId(skill.id);
-                                                                try {
-                                                                    const res = await fileApi.importSkill(id!, skill.id);
-                                                                    alert(`✅ Imported "${skill.name}" (${res.files_written} files)`);
-                                                                    queryClient.invalidateQueries({ queryKey: ['files', id, 'skills'] });
-                                                                    setShowImportSkillModal(false);
-                                                                } catch (err: any) {
-                                                                    alert(`❌ Import failed: ${err?.message || err}`);
-                                                                } finally {
-                                                                    setImportingSkillId(null);
-                                                                }
-                                                            }}
-                                                        >
-                                                            {importingSkillId === skill.id ? '⏳ ...' : '⬇️ Import'}
-                                                        </button>
-                                                    </div>
-                                                ))
-                                            )}
+                                                    ))
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                            )}
-                        </div>
-                    );
-                })()}
+                                )}
+                            </div>
+                        );
+                    })()
+                }
 
                 {/* ── Relationships Tab ── */}
-                {activeTab === 'relationships' && (
-                    <RelationshipEditor agentId={id!} readOnly={(agent as any)?.access_level === 'use'} />
-                )}
+                {
+                    activeTab === 'relationships' && (
+                        <RelationshipEditor agentId={id!} readOnly={(agent as any)?.access_level === 'use'} />
+                    )
+                }
 
                 {/* ── Workspace Tab ── */}
-                {activeTab === 'workspace' && (() => {
-                    const adapter: FileBrowserApi = {
-                        list: (p) => fileApi.list(id!, p),
-                        read: (p) => fileApi.read(id!, p),
-                        write: (p, c) => fileApi.write(id!, p, c),
-                        delete: (p) => fileApi.delete(id!, p),
-                        upload: (file, path) => fileApi.upload(id!, file, path + '/'),
-                    };
-                    return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: true, newFile: true, newFolder: true, edit: true, delete: true, directoryNavigation: true }} />;
-                })()}
+                {
+                    activeTab === 'workspace' && (() => {
+                        const adapter: FileBrowserApi = {
+                            list: (p) => fileApi.list(id!, p),
+                            read: (p) => fileApi.read(id!, p),
+                            write: (p, c) => fileApi.write(id!, p, c),
+                            delete: (p) => fileApi.delete(id!, p),
+                            upload: (file, path) => fileApi.upload(id!, file, path + '/'),
+                        };
+                        return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: true, newFile: true, newFolder: true, edit: true, delete: true, directoryNavigation: true }} />;
+                    })()
+                }
 
-                {activeTab === 'chat' && (
-                    <div style={{ display: 'flex', gap: '0', flex: 1, minHeight: 0, height: 'calc(100vh - 206px)' }}>
-                        {/* ── Left: session sidebar ── */}
-                        <div style={{ width: '220px', flexShrink: 0, borderRight: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                            {/* Tab row */}
-                            <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px 0', gap: '4px', borderBottom: '1px solid var(--border-subtle)' }}>
-                                <button onClick={() => setChatScope('mine')}
-                                    style={{ flex: 1, padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: chatScope === 'mine' ? 600 : 400, color: chatScope === 'mine' ? 'var(--text-primary)' : 'var(--text-tertiary)', borderBottom: chatScope === 'mine' ? '2px solid var(--accent-primary)' : '2px solid transparent', paddingBottom: '8px' }}>
-                                    My Sessions
-                                </button>
-                                {isAdmin && (
-                                    <button onClick={() => { setChatScope('all'); fetchAllSessions(); }}
-                                        style={{ flex: 1, padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: chatScope === 'all' ? 600 : 400, color: chatScope === 'all' ? 'var(--text-primary)' : 'var(--text-tertiary)', borderBottom: chatScope === 'all' ? '2px solid var(--accent-primary)' : '2px solid transparent', paddingBottom: '8px' }}>
-                                        All Users
+                {
+                    activeTab === 'chat' && (
+                        <div style={{ display: 'flex', gap: '0', flex: 1, minHeight: 0, height: 'calc(100vh - 206px)' }}>
+                            {/* ── Left: session sidebar ── */}
+                            <div style={{ width: '220px', flexShrink: 0, borderRight: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                                {/* Tab row */}
+                                <div style={{ display: 'flex', alignItems: 'center', padding: '10px 12px 0', gap: '4px', borderBottom: '1px solid var(--border-subtle)' }}>
+                                    <button onClick={() => setChatScope('mine')}
+                                        style={{ flex: 1, padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: chatScope === 'mine' ? 600 : 400, color: chatScope === 'mine' ? 'var(--text-primary)' : 'var(--text-tertiary)', borderBottom: chatScope === 'mine' ? '2px solid var(--accent-primary)' : '2px solid transparent', paddingBottom: '8px' }}>
+                                        My Sessions
                                     </button>
-                                )}
-                            </div>
-
-                            {/* Actions row */}
-                            {chatScope === 'mine' && (
-                                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
-                                    <button onClick={createNewSession}
-                                        style={{ width: '100%', padding: '5px 8px', background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px' }}
-                                        onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-secondary)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
-                                        onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--text-secondary)'; }}>
-                                        + New Session
-                                    </button>
+                                    {isAdmin && (
+                                        <button onClick={() => { setChatScope('all'); fetchAllSessions(); }}
+                                            style={{ flex: 1, padding: '5px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: chatScope === 'all' ? 600 : 400, color: chatScope === 'all' ? 'var(--text-primary)' : 'var(--text-tertiary)', borderBottom: chatScope === 'all' ? '2px solid var(--accent-primary)' : '2px solid transparent', paddingBottom: '8px' }}>
+                                            All Users
+                                        </button>
+                                    )}
                                 </div>
-                            )}
 
-                            {/* Session list */}
-                            <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
-                                {chatScope === 'mine' ? (
-                                    sessionsLoading ? (
-                                        <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>
-                                    ) : sessions.length === 0 ? (
-                                        <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>No sessions yet.<br />Click "+ New Session" to start.</div>
-                                    ) : sessions.map((s: any) => {
-                                        const isActive = activeSession?.id === s.id;
-                                        const isOwn = s.user_id === String(currentUser?.id);
-                                        const channelLabel: Record<string, string> = { feishu: '飞书', discord: 'Discord', slack: 'Slack' };
-                                        const chLabel = channelLabel[s.source_channel];
-                                        return (
-                                            <div key={s.id} onClick={() => selectSession(s)}
-                                                style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px' }}
-                                                onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
-                                                onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
-                                                    <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
-                                                    {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
-                                                </div>
-                                                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                    {isOwn && isActive && wsConnected && <span className="status-dot running" style={{ width: '5px', height: '5px', flexShrink: 0 }} />}
-                                                    {s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : new Date(s.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric' })}
-                                                    {s.message_count > 0 && <span style={{ marginLeft: 'auto' }}>{s.message_count}</span>}
-                                                </div>
-                                            </div>
-                                        );
-                                    })
-                                ) : (
-                                    /* All Users tab — user filter dropdown + flat list */
-                                    <>
-                                        {/* User filter dropdown */}
-                                        <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
-                                            <select
-                                                value={allUserFilter}
-                                                onChange={e => setAllUserFilter(e.target.value)}
-                                                style={{ width: '100%', padding: '4px 6px', fontSize: '11px', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '5px', color: 'var(--text-primary)', cursor: 'pointer' }}
-                                            >
-                                                <option value="">All Users</option>
-                                                {Array.from(new Set(allSessions.map((s: any) => s.username || s.user_id))).filter(Boolean).map((u: any) => (
-                                                    <option key={u} value={u}>{u}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        {/* Filtered session list */}
-                                        {allSessions
-                                            .filter((s: any) => !allUserFilter || (s.username || s.user_id) === allUserFilter)
-                                            .map((s: any) => {
-                                                const isActive = activeSession?.id === s.id;
-                                                return (
-                                                    <div key={s.id} onClick={() => selectSession(s)}
-                                                        style={{ padding: '6px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent' }}
-                                                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
-                                                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '1px' }}>
-                                                            <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', flex: 1 }}>{s.title}</div>
-                                                            {({ feishu: '飞书', discord: 'Discord', slack: 'Slack' } as Record<string, string>)[s.source_channel] && (
-                                                                <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                                                                    {({ feishu: '飞书', discord: 'Discord', slack: 'Slack' } as Record<string, string>)[s.source_channel]}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '4px' }}>
-                                                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.username || ''}</span>
-                                                            <span style={{ flexShrink: 0 }}>{s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}{s.message_count > 0 ? ` · ${s.message_count}` : ''}</span>
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })}
-                                    </>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* ── Right: chat/message area ── */}
-                        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
-                            {!activeSession ? (
-                                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', fontSize: '13px', flexDirection: 'column', gap: '8px' }}>
-                                    <div>No session selected</div>
-                                    <button className="btn btn-secondary" onClick={createNewSession} style={{ fontSize: '12px' }}>Start a new session</button>
-                                </div>
-                            ) : (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) || activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent' ? (
-                                /* ── Read-only history view (other user's session or agent-to-agent) ── */
-                                <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: '4px', display: 'inline-block' }}>
-                                        {activeSession.source_channel === 'agent' ? `🤖 Agent Conversation · ${activeSession.username || 'Agents'}` : `Read-only · ${activeSession.username || 'User'}`}
+                                {/* Actions row */}
+                                {chatScope === 'mine' && (
+                                    <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+                                        <button onClick={createNewSession}
+                                            style={{ width: '100%', padding: '5px 8px', background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px' }}
+                                            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-secondary)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                                            onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = 'var(--text-secondary)'; }}>
+                                            + New Session
+                                        </button>
                                     </div>
-                                    {historyMsgs.map((m: any, i: number) => {
-                                        if (m.role === 'tool_call') {
-                                            let parsed: any = {}; try { parsed = typeof m.content === 'string' ? JSON.parse(m.content) : m.content; } catch { parsed = { name: 'tool', result: m.content }; }
+                                )}
+
+                                {/* Session list */}
+                                <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+                                    {chatScope === 'mine' ? (
+                                        sessionsLoading ? (
+                                            <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>
+                                        ) : sessions.length === 0 ? (
+                                            <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>No sessions yet.<br />Click "+ New Session" to start.</div>
+                                        ) : sessions.map((s: any) => {
+                                            const isActive = activeSession?.id === s.id;
+                                            const isOwn = s.user_id === String(currentUser?.id);
+                                            const channelLabel: Record<string, string> = { feishu: '飞书', discord: 'Discord', slack: 'Slack' };
+                                            const chLabel = channelLabel[s.source_channel];
                                             return (
-                                                <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
-                                                    <details style={{ flex: 1, borderRadius: '8px', background: 'var(--accent-subtle)', border: '1px solid var(--accent-subtle)', fontSize: '12px' }}>
-                                                        <summary style={{ padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none', listStyle: 'none' }}>
-                                                            <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{parsed.name || 'tool'}</span>
-                                                            <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>done</span>
-                                                        </summary>
-                                                        {parsed.result && <div style={{ padding: '4px 10px 8px', color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '160px', overflow: 'auto' }}>{parsed.result}</div>}
-                                                    </details>
+                                                <div key={s.id} onClick={() => selectSession(s)}
+                                                    style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px' }}
+                                                    onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
+                                                    onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
+                                                        <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
+                                                        {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
+                                                    </div>
+                                                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                        {isOwn && isActive && wsConnected && <span className="status-dot running" style={{ width: '5px', height: '5px', flexShrink: 0 }} />}
+                                                        {s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : new Date(s.created_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric' })}
+                                                        {s.message_count > 0 && <span style={{ marginLeft: 'auto' }}>{s.message_count}</span>}
+                                                    </div>
                                                 </div>
                                             );
-                                        }
-                                        return (
-                                            <div key={i} style={{ display: 'flex', flexDirection: m.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                                                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.sender_name ? m.sender_name[0] : (m.role === 'assistant' ? 'A' : 'U')}</div>
-                                                <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: m.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                                                    {m.sender_name && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600 }}>🤖 {m.sender_name}</div>}
-                                                    {(() => {
-                                                        const pm = parseChatMsg({ role: m.role as ChatMsg['role'], content: m.content || '' });
-                                                        const fe = pm.fileName?.split('.').pop()?.toLowerCase() ?? '';
-                                                        const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
-                                                        return (
-                                                            <>
-                                                                {pm.fileName && (
-                                                                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'var(--bg-elevated)', borderRadius: '6px', padding: '4px 8px', marginBottom: pm.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
-                                                                        <span>{fi}</span>
-                                                                        <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pm.fileName}</span>
-                                                                    </div>
+                                        })
+                                    ) : (
+                                        /* All Users tab — user filter dropdown + flat list */
+                                        <>
+                                            {/* User filter dropdown */}
+                                            <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
+                                                <select
+                                                    value={allUserFilter}
+                                                    onChange={e => setAllUserFilter(e.target.value)}
+                                                    style={{ width: '100%', padding: '4px 6px', fontSize: '11px', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '5px', color: 'var(--text-primary)', cursor: 'pointer' }}
+                                                >
+                                                    <option value="">All Users</option>
+                                                    {Array.from(new Set(allSessions.map((s: any) => s.username || s.user_id))).filter(Boolean).map((u: any) => (
+                                                        <option key={u} value={u}>{u}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                            {/* Filtered session list */}
+                                            {allSessions
+                                                .filter((s: any) => !allUserFilter || (s.username || s.user_id) === allUserFilter)
+                                                .map((s: any) => {
+                                                    const isActive = activeSession?.id === s.id;
+                                                    return (
+                                                        <div key={s.id} onClick={() => selectSession(s)}
+                                                            style={{ padding: '6px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent' }}
+                                                            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
+                                                            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '1px' }}>
+                                                                <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', flex: 1 }}>{s.title}</div>
+                                                                {({ feishu: '飞书', discord: 'Discord', slack: 'Slack' } as Record<string, string>)[s.source_channel] && (
+                                                                    <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                                                        {({ feishu: '飞书', discord: 'Discord', slack: 'Slack' } as Record<string, string>)[s.source_channel]}
+                                                                    </span>
                                                                 )}
-                                                                {pm.content ? (m.role === 'assistant' ? <MarkdownRenderer content={pm.content} /> : <div style={{ whiteSpace: 'pre-wrap' }}>{pm.content}</div>) : null}
-                                                            </>
-                                                        );
-                                                    })()}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
+                                                            </div>
+                                                            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '4px' }}>
+                                                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.username || ''}</span>
+                                                                <span style={{ flexShrink: 0 }}>{s.last_message_at ? new Date(s.last_message_at).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}{s.message_count > 0 ? ` · ${s.message_count}` : ''}</span>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                        </>
+                                    )}
                                 </div>
-                            ) : (
-                                /* ── Live WebSocket chat (own session) ── */
-                                <>
-                                    <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-                                        {chatMessages.length === 0 && (
-                                            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
-                                                <div style={{ fontSize: '13px', marginBottom: '4px' }}>{activeSession?.title || t('agent.chat.startChat')}</div>
-                                                <div style={{ fontSize: '12px' }}>{t('agent.chat.startConversation', { name: agent.name })}</div>
-                                                <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
-                                            </div>
-                                        )}
-                                        {chatMessages.map((msg, i) => {
-                                            if (msg.role === 'tool_call') {
+                            </div>
+
+                            {/* ── Right: chat/message area ── */}
+                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
+                                {!activeSession ? (
+                                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', fontSize: '13px', flexDirection: 'column', gap: '8px' }}>
+                                        <div>No session selected</div>
+                                        <button className="btn btn-secondary" onClick={createNewSession} style={{ fontSize: '12px' }}>Start a new session</button>
+                                    </div>
+                                ) : (activeSession.user_id && currentUser && activeSession.user_id !== String(currentUser.id)) || activeSession.source_channel === 'agent' || activeSession.participant_type === 'agent' ? (
+                                    /* ── Read-only history view (other user's session or agent-to-agent) ── */
+                                    <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: '4px', display: 'inline-block' }}>
+                                            {activeSession.source_channel === 'agent' ? `🤖 Agent Conversation · ${activeSession.username || 'Agents'}` : `Read-only · ${activeSession.username || 'User'}`}
+                                        </div>
+                                        {historyMsgs.map((m: any, i: number) => {
+                                            if (m.role === 'tool_call') {
+                                                let parsed: any = {}; try { parsed = typeof m.content === 'string' ? JSON.parse(m.content) : m.content; } catch { parsed = { name: 'tool', result: m.content }; }
                                                 return (
                                                     <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
                                                         <details style={{ flex: 1, borderRadius: '8px', background: 'var(--accent-subtle)', border: '1px solid var(--accent-subtle)', fontSize: '12px' }}>
                                                             <summary style={{ padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none', listStyle: 'none' }}>
-                                                                <span style={{ fontSize: '13px' }}>{msg.toolStatus === 'running' ? '⏳' : '⚡'}</span>
-                                                                <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{msg.toolName}</span>
-                                                                {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{`(${Object.entries(msg.toolArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v)}`).join(', ')})`}</span>}
-                                                                {msg.toolStatus === 'running' && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>{t('common.loading')}</span>}
+                                                                <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{parsed.name || 'tool'}</span>
+                                                                <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>done</span>
                                                             </summary>
-                                                            {msg.toolResult && <div style={{ padding: '4px 10px 8px' }}><div style={{ color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '240px', overflow: 'auto', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', padding: '4px 6px' }}>{msg.toolResult}</div></div>}
+                                                            {parsed.result && <div style={{ padding: '4px 10px 8px', color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '160px', overflow: 'auto' }}>{parsed.result}</div>}
                                                         </details>
                                                     </div>
                                                 );
                                             }
                                             return (
-                                                <div key={i} style={{ display: 'flex', flexDirection: msg.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                                                    <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: msg.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{msg.role === 'user' ? 'U' : 'A'}</div>
-                                                    <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: msg.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                                                        {msg.fileName && (() => {
-                                                            const fe = msg.fileName!.split('.').pop()?.toLowerCase() ?? '';
-                                                            const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
-                                                            if (isImage && msg.imageUrl) {
-                                                                return (<div style={{ marginBottom: '4px' }}>
-                                                                    <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
-                                                                </div>);
-                                                            }
+                                                <div key={i} style={{ display: 'flex', flexDirection: m.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
+                                                    <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: m.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{m.sender_name ? m.sender_name[0] : (m.role === 'assistant' ? 'A' : 'U')}</div>
+                                                    <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: m.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                                                        {m.sender_name && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600 }}>🤖 {m.sender_name}</div>}
+                                                        {(() => {
+                                                            const pm = parseChatMsg({ role: m.role as ChatMsg['role'], content: m.content || '' });
+                                                            const fe = pm.fileName?.split('.').pop()?.toLowerCase() ?? '';
                                                             const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
-                                                            return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
+                                                            return (
+                                                                <>
+                                                                    {pm.fileName && (
+                                                                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'var(--bg-elevated)', borderRadius: '6px', padding: '4px 8px', marginBottom: pm.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
+                                                                            <span>{fi}</span>
+                                                                            <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pm.fileName}</span>
+                                                                        </div>
+                                                                    )}
+                                                                    {pm.content ? (m.role === 'assistant' ? <MarkdownRenderer content={pm.content} /> : <div style={{ whiteSpace: 'pre-wrap' }}>{pm.content}</div>) : null}
+                                                                </>
+                                                            );
                                                         })()}
-                                                        {msg.thinking && (
-                                                            <details style={{
-                                                                marginBottom: '8px', fontSize: '12px',
-                                                                background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px',
-                                                                border: '1px solid rgba(147, 130, 220, 0.15)',
-                                                            }}>
-                                                                <summary style={{
-                                                                    padding: '6px 10px', cursor: 'pointer',
-                                                                    color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500,
-                                                                    userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px',
-                                                                }}>
-                                                                    💭 Thinking
-                                                                </summary>
-                                                                <div style={{
-                                                                    padding: '4px 10px 8px',
-                                                                    fontSize: '12px', lineHeight: '1.6',
-                                                                    color: 'var(--text-secondary)',
-                                                                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                                                                    maxHeight: '300px', overflow: 'auto',
-                                                                }}>
-                                                                    {msg.thinking}
-                                                                </div>
-                                                            </details>
-                                                        )}
-                                                        {msg.role === 'assistant' ? <MarkdownRenderer content={msg.content} /> : msg.content ? <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div> : null}
                                                     </div>
                                                 </div>
                                             );
                                         })}
-                                        <div ref={chatEndRef} />
                                     </div>
-                                    {showScrollBtn && (
-                                        <button onClick={scrollToBottom} style={{ position: 'absolute', bottom: '70px', right: '20px', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.3)', zIndex: 10 }} title="Scroll to bottom">↓</button>
-                                    )}
-                                    {agentExpired ? (
-                                        <div style={{ padding: '7px 16px', borderTop: '1px solid rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'rgb(180,100,0)' }}>
-                                            <span>u23f8</span>
-                                            <span>This Agent has <strong>expired</strong> and is off duty. Contact your admin to extend its service.</span>
-                                        </div>
-                                    ) : !wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? (
-                                        <div style={{ padding: '3px 16px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                            <span style={{ display: 'inline-block', width: '5px', height: '5px', borderRadius: '50%', background: 'var(--accent-primary)', opacity: 0.8, animation: 'pulse 1.2s ease-in-out infinite' }} />
-                                            Connecting...
-                                        </div>
-                                    ) : null}
-                                    {attachedFile && (
-                                        <div style={{ padding: '4px 16px', background: 'var(--bg-elevated)', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
-                                            <span>⦹ {attachedFile.name}</span>
-                                            <button onClick={() => setAttachedFile(null)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}>✕</button>
-                                        </div>
-                                    )}
-                                    <div style={{ display: 'flex', gap: '8px', padding: '6px 12px', borderTop: '1px solid var(--border-subtle)' }}>
-                                        <input type="file" ref={fileInputRef} onChange={handleChatFile} style={{ display: 'none' }} />
-                                        <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()} disabled={!wsConnected || uploading} style={{ padding: '6px 10px', fontSize: '14px', minWidth: 'auto' }}>{uploading ? '⏳' : '⦹'}</button>
-                                        <input ref={chatInputRef} className="chat-input" value={chatInput} onChange={e => setChatInput(e.target.value)}
-                                            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMsg(); } }}
-                                            placeholder={!wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? 'Connecting...' : attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
-                                            disabled={!wsConnected} style={{ flex: 1 }} autoFocus />
-                                        <button className="btn btn-primary" onClick={sendChatMsg} disabled={!wsConnected || (!chatInput.trim() && !attachedFile)} style={{ padding: '6px 16px' }}>{t('chat.send')}</button>
-                                    </div>
-                                </>
-                            )}
-                        </div>
-                    </div>
-                )}
-
-                {activeTab === 'activityLog' && (() => {
-                    // Category definitions
-                    const userActionTypes = ['chat_reply', 'tool_call', 'task_created', 'task_updated', 'file_written', 'error'];
-                    const heartbeatTypes = ['heartbeat', 'plaza_post'];
-                    const scheduleTypes = ['schedule_run'];
-                    const messageTypes = ['feishu_msg_sent', 'agent_msg_sent', 'web_msg_sent'];
-
-                    let filteredLogs = activityLogs;
-                    if (logFilter === 'user') {
-                        filteredLogs = activityLogs.filter((l: any) => userActionTypes.includes(l.action_type));
-                    } else if (logFilter === 'backend') {
-                        filteredLogs = activityLogs.filter((l: any) => !userActionTypes.includes(l.action_type));
-                    } else if (logFilter === 'heartbeat') {
-                        filteredLogs = activityLogs.filter((l: any) => heartbeatTypes.includes(l.action_type));
-                    } else if (logFilter === 'schedule') {
-                        filteredLogs = activityLogs.filter((l: any) => scheduleTypes.includes(l.action_type));
-                    } else if (logFilter === 'messages') {
-                        filteredLogs = activityLogs.filter((l: any) => messageTypes.includes(l.action_type));
-                    }
-
-                    const filterBtn = (key: string, label: string, indent = false) => (
-                        <button
-                            key={key}
-                            onClick={() => setLogFilter(key)}
-                            style={{
-                                padding: indent ? '4px 10px 4px 20px' : '6px 14px',
-                                fontSize: indent ? '11px' : '12px',
-                                fontWeight: logFilter === key ? 600 : 400,
-                                color: logFilter === key ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                                background: logFilter === key ? 'rgba(99,102,241,0.1)' : 'transparent',
-                                border: logFilter === key ? '1px solid var(--accent-primary)' : '1px solid var(--border-subtle)',
-                                borderRadius: '6px',
-                                cursor: 'pointer',
-                                transition: 'all 0.15s',
-                                whiteSpace: 'nowrap' as const,
-                            }}
-                        >
-                            {label}
-                        </button>
-                    );
-
-                    return (
-                        <div>
-                            <h3 style={{ marginBottom: '12px' }}>{t('agent.activityLog.title')}</h3>
-
-                            {/* Filter tabs */}
-                            <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
-                                {filterBtn('user', '👤 ' + t('agent.activityLog.userActions', 'User Actions'))}
-                                {filterBtn('backend', '⚙️ ' + t('agent.activityLog.backendServices', 'Backend Services'))}
-                                {(logFilter === 'backend' || logFilter === 'heartbeat' || logFilter === 'schedule' || logFilter === 'messages') && (
+                                ) : (
+                                    /* ── Live WebSocket chat (own session) ── */
                                     <>
-                                        <span style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>│</span>
-                                        {filterBtn('heartbeat', '💓 Heartbeat', true)}
-                                        {filterBtn('schedule', '⏰ Schedule/Cron', true)}
-                                        {filterBtn('messages', '📨 Messages', true)}
+                                        <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+                                            {chatMessages.length === 0 && (
+                                                <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
+                                                    <div style={{ fontSize: '13px', marginBottom: '4px' }}>{activeSession?.title || t('agent.chat.startChat')}</div>
+                                                    <div style={{ fontSize: '12px' }}>{t('agent.chat.startConversation', { name: agent.name })}</div>
+                                                    <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
+                                                </div>
+                                            )}
+                                            {chatMessages.map((msg, i) => {
+                                                if (msg.role === 'tool_call') {
+                                                    return (
+                                                        <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px' }}>
+                                                            <details style={{ flex: 1, borderRadius: '8px', background: 'var(--accent-subtle)', border: '1px solid var(--accent-subtle)', fontSize: '12px' }}>
+                                                                <summary style={{ padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none', listStyle: 'none' }}>
+                                                                    <span style={{ fontSize: '13px' }}>{msg.toolStatus === 'running' ? '⏳' : '⚡'}</span>
+                                                                    <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{msg.toolName}</span>
+                                                                    {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{`(${Object.entries(msg.toolArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v)}`).join(', ')})`}</span>}
+                                                                    {msg.toolStatus === 'running' && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' }}>{t('common.loading')}</span>}
+                                                                </summary>
+                                                                {msg.toolResult && <div style={{ padding: '4px 10px 8px' }}><div style={{ color: 'var(--text-secondary)', fontSize: '11px', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '240px', overflow: 'auto', background: 'rgba(0,0,0,0.15)', borderRadius: '4px', padding: '4px 6px' }}>{msg.toolResult}</div></div>}
+                                                            </details>
+                                                        </div>
+                                                    );
+                                                }
+                                                return (
+                                                    <div key={i} style={{ display: 'flex', flexDirection: msg.role === 'assistant' ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
+                                                        <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: msg.role === 'assistant' ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{msg.role === 'user' ? 'U' : 'A'}</div>
+                                                        <div style={{ maxWidth: '70%', padding: '8px 12px', borderRadius: '12px', background: msg.role === 'assistant' ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
+                                                            {msg.fileName && (() => {
+                                                                const fe = msg.fileName!.split('.').pop()?.toLowerCase() ?? '';
+                                                                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
+                                                                if (isImage && msg.imageUrl) {
+                                                                    return (<div style={{ marginBottom: '4px' }}>
+                                                                        <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
+                                                                    </div>);
+                                                                }
+                                                                const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
+                                                                return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
+                                                            })()}
+                                                            {msg.thinking && (
+                                                                <details style={{
+                                                                    marginBottom: '8px', fontSize: '12px',
+                                                                    background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px',
+                                                                    border: '1px solid rgba(147, 130, 220, 0.15)',
+                                                                }}>
+                                                                    <summary style={{
+                                                                        padding: '6px 10px', cursor: 'pointer',
+                                                                        color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500,
+                                                                        userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px',
+                                                                    }}>
+                                                                        💭 Thinking
+                                                                    </summary>
+                                                                    <div style={{
+                                                                        padding: '4px 10px 8px',
+                                                                        fontSize: '12px', lineHeight: '1.6',
+                                                                        color: 'var(--text-secondary)',
+                                                                        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                                                                        maxHeight: '300px', overflow: 'auto',
+                                                                    }}>
+                                                                        {msg.thinking}
+                                                                    </div>
+                                                                </details>
+                                                            )}
+                                                            {msg.role === 'assistant' ? <MarkdownRenderer content={msg.content} /> : msg.content ? <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div> : null}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                            <div ref={chatEndRef} />
+                                        </div>
+                                        {showScrollBtn && (
+                                            <button onClick={scrollToBottom} style={{ position: 'absolute', bottom: '70px', right: '20px', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', boxShadow: '0 2px 8px rgba(0,0,0,0.3)', zIndex: 10 }} title="Scroll to bottom">↓</button>
+                                        )}
+                                        {agentExpired ? (
+                                            <div style={{ padding: '7px 16px', borderTop: '1px solid rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'rgb(180,100,0)' }}>
+                                                <span>u23f8</span>
+                                                <span>This Agent has <strong>expired</strong> and is off duty. Contact your admin to extend its service.</span>
+                                            </div>
+                                        ) : !wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? (
+                                            <div style={{ padding: '3px 16px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                <span style={{ display: 'inline-block', width: '5px', height: '5px', borderRadius: '50%', background: 'var(--accent-primary)', opacity: 0.8, animation: 'pulse 1.2s ease-in-out infinite' }} />
+                                                Connecting...
+                                            </div>
+                                        ) : null}
+                                        {attachedFile && (
+                                            <div style={{ padding: '6px 16px', background: 'var(--bg-elevated)', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px' }}>
+                                                {attachedFile.imageUrl ? (
+                                                    <img src={attachedFile.imageUrl} alt={attachedFile.name} style={{ width: '40px', height: '40px', borderRadius: '6px', objectFit: 'cover', border: '1px solid var(--border-subtle)' }} />
+                                                ) : (
+                                                    <span>📎</span>
+                                                )}
+                                                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{attachedFile.name}</span>
+                                                <button onClick={() => setAttachedFile(null)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: '14px', padding: '2px 4px' }}>✕</button>
+                                            </div>
+                                        )}
+                                        <div style={{ display: 'flex', gap: '8px', padding: '6px 12px', borderTop: '1px solid var(--border-subtle)' }}>
+                                            <input type="file" ref={fileInputRef} onChange={handleChatFile} style={{ display: 'none' }} />
+                                            <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()} disabled={!wsConnected || uploading} style={{ padding: '6px 10px', fontSize: '14px', minWidth: 'auto' }}>{uploading ? '⏳' : '⦹'}</button>
+                                            <input ref={chatInputRef} className="chat-input" value={chatInput} onChange={e => setChatInput(e.target.value)}
+                                                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMsg(); } }}
+                                                onPaste={handlePaste}
+                                                placeholder={!wsConnected && (!activeSession?.user_id || !currentUser || activeSession.user_id === String(currentUser?.id)) ? 'Connecting...' : attachedFile ? t('agent.chat.askAboutFile', { name: attachedFile.name }) : t('chat.placeholder')}
+                                                disabled={!wsConnected} style={{ flex: 1 }} autoFocus />
+                                            <button className="btn btn-primary" onClick={sendChatMsg} disabled={!wsConnected || (!chatInput.trim() && !attachedFile)} style={{ padding: '6px 16px' }}>{t('chat.send')}</button>
+                                        </div>
                                     </>
                                 )}
                             </div>
+                        </div>
+                    )
+                }
 
-                            {filteredLogs.length > 0 ? (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                    {filteredLogs.map((log: any) => {
-                                        const icons: Record<string, string> = {
-                                            chat_reply: '💬', tool_call: '⚡', feishu_msg_sent: '📤',
-                                            agent_msg_sent: '🤖', web_msg_sent: '🌐', task_created: '📋',
-                                            task_updated: '✅', file_written: '📝', error: '❌',
-                                            schedule_run: '⏰', heartbeat: '💓', plaza_post: '🏛️',
-                                        };
-                                        const time = log.created_at ? new Date(log.created_at).toLocaleString('zh-CN', {
-                                            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
-                                        }) : '';
-                                        const isExpanded = expandedLogId === log.id;
-                                        return (
-                                            <div key={log.id}
-                                                onClick={() => setExpandedLogId(isExpanded ? null : log.id)}
-                                                style={{
-                                                    padding: '10px 14px', borderRadius: '8px', cursor: 'pointer',
-                                                    background: isExpanded ? 'var(--bg-elevated)' : 'var(--bg-secondary)', fontSize: '13px',
-                                                    border: isExpanded ? '1px solid var(--accent-primary)' : '1px solid transparent',
-                                                    transition: 'all 0.15s ease',
-                                                }}
-                                            >
-                                                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                                                    <span style={{ fontSize: '16px', flexShrink: 0, marginTop: '1px' }}>
-                                                        {icons[log.action_type] || '·'}
-                                                    </span>
-                                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                                        <div style={{ fontWeight: 500, marginBottom: '2px' }}>{log.summary}</div>
-                                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                                            {time} · {log.action_type}
-                                                            {log.detail && !isExpanded && <span style={{ marginLeft: '8px', color: 'var(--accent-primary)' }}>▸ Details</span>}
+                {
+                    activeTab === 'activityLog' && (() => {
+                        // Category definitions
+                        const userActionTypes = ['chat_reply', 'tool_call', 'task_created', 'task_updated', 'file_written', 'error'];
+                        const heartbeatTypes = ['heartbeat', 'plaza_post'];
+                        const scheduleTypes = ['schedule_run'];
+                        const messageTypes = ['feishu_msg_sent', 'agent_msg_sent', 'web_msg_sent'];
+
+                        let filteredLogs = activityLogs;
+                        if (logFilter === 'user') {
+                            filteredLogs = activityLogs.filter((l: any) => userActionTypes.includes(l.action_type));
+                        } else if (logFilter === 'backend') {
+                            filteredLogs = activityLogs.filter((l: any) => !userActionTypes.includes(l.action_type));
+                        } else if (logFilter === 'heartbeat') {
+                            filteredLogs = activityLogs.filter((l: any) => heartbeatTypes.includes(l.action_type));
+                        } else if (logFilter === 'schedule') {
+                            filteredLogs = activityLogs.filter((l: any) => scheduleTypes.includes(l.action_type));
+                        } else if (logFilter === 'messages') {
+                            filteredLogs = activityLogs.filter((l: any) => messageTypes.includes(l.action_type));
+                        }
+
+                        const filterBtn = (key: string, label: string, indent = false) => (
+                            <button
+                                key={key}
+                                onClick={() => setLogFilter(key)}
+                                style={{
+                                    padding: indent ? '4px 10px 4px 20px' : '6px 14px',
+                                    fontSize: indent ? '11px' : '12px',
+                                    fontWeight: logFilter === key ? 600 : 400,
+                                    color: logFilter === key ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                    background: logFilter === key ? 'rgba(99,102,241,0.1)' : 'transparent',
+                                    border: logFilter === key ? '1px solid var(--accent-primary)' : '1px solid var(--border-subtle)',
+                                    borderRadius: '6px',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                    whiteSpace: 'nowrap' as const,
+                                }}
+                            >
+                                {label}
+                            </button>
+                        );
+
+                        return (
+                            <div>
+                                <h3 style={{ marginBottom: '12px' }}>{t('agent.activityLog.title')}</h3>
+
+                                {/* Filter tabs */}
+                                <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    {filterBtn('user', '👤 ' + t('agent.activityLog.userActions', 'User Actions'))}
+                                    {filterBtn('backend', '⚙️ ' + t('agent.activityLog.backendServices', 'Backend Services'))}
+                                    {(logFilter === 'backend' || logFilter === 'heartbeat' || logFilter === 'schedule' || logFilter === 'messages') && (
+                                        <>
+                                            <span style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>│</span>
+                                            {filterBtn('heartbeat', '💓 Heartbeat', true)}
+                                            {filterBtn('schedule', '⏰ Schedule/Cron', true)}
+                                            {filterBtn('messages', '📨 Messages', true)}
+                                        </>
+                                    )}
+                                </div>
+
+                                {filteredLogs.length > 0 ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                        {filteredLogs.map((log: any) => {
+                                            const icons: Record<string, string> = {
+                                                chat_reply: '💬', tool_call: '⚡', feishu_msg_sent: '📤',
+                                                agent_msg_sent: '🤖', web_msg_sent: '🌐', task_created: '📋',
+                                                task_updated: '✅', file_written: '📝', error: '❌',
+                                                schedule_run: '⏰', heartbeat: '💓', plaza_post: '🏛️',
+                                            };
+                                            const time = log.created_at ? new Date(log.created_at).toLocaleString('zh-CN', {
+                                                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                            }) : '';
+                                            const isExpanded = expandedLogId === log.id;
+                                            return (
+                                                <div key={log.id}
+                                                    onClick={() => setExpandedLogId(isExpanded ? null : log.id)}
+                                                    style={{
+                                                        padding: '10px 14px', borderRadius: '8px', cursor: 'pointer',
+                                                        background: isExpanded ? 'var(--bg-elevated)' : 'var(--bg-secondary)', fontSize: '13px',
+                                                        border: isExpanded ? '1px solid var(--accent-primary)' : '1px solid transparent',
+                                                        transition: 'all 0.15s ease',
+                                                    }}
+                                                >
+                                                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                                                        <span style={{ fontSize: '16px', flexShrink: 0, marginTop: '1px' }}>
+                                                            {icons[log.action_type] || '·'}
+                                                        </span>
+                                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                                            <div style={{ fontWeight: 500, marginBottom: '2px' }}>{log.summary}</div>
+                                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                                {time} · {log.action_type}
+                                                                {log.detail && !isExpanded && <span style={{ marginLeft: '8px', color: 'var(--accent-primary)' }}>▸ Details</span>}
+                                                            </div>
                                                         </div>
                                                     </div>
+                                                    {isExpanded && log.detail && (
+                                                        <div style={{ marginTop: '8px', padding: '10px', borderRadius: '6px', background: 'var(--bg-primary)', fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: '1.6', color: 'var(--text-secondary)', maxHeight: '300px', overflowY: 'auto' }}>
+                                                            {Object.entries(log.detail).map(([k, v]: [string, any]) => (
+                                                                <div key={k} style={{ marginBottom: '6px' }}>
+                                                                    <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>{k}:</span>{' '}
+                                                                    <span>{typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v)}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                {isExpanded && log.detail && (
-                                                    <div style={{ marginTop: '8px', padding: '10px', borderRadius: '6px', background: 'var(--bg-primary)', fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: '1.6', color: 'var(--text-secondary)', maxHeight: '300px', overflowY: 'auto' }}>
-                                                        {Object.entries(log.detail).map(([k, v]: [string, any]) => (
-                                                            <div key={k} style={{ marginBottom: '6px' }}>
-                                                                <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>{k}:</span>{' '}
-                                                                <span>{typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v)}</span>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            ) : (
-                                <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>
-                                    {t('agent.activityLog.noRecords')}
-                                </div>
-                            )}
-                        </div>
-                    );
-                })()}
+                                            );
+                                        })}
+                                    </div>
+                                ) : (
+                                    <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>
+                                        {t('agent.activityLog.noRecords')}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })()
+                }
 
                 {/* ── Feishu Channel Tab ── */}
 

@@ -19,6 +19,42 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
 }
 
+/* ─── Notification Bar ─── */
+function NotificationBar() {
+    const [config, setConfig] = useState<{ enabled: boolean; text: string } | null>(null);
+    const [dismissed, setDismissed] = useState(false);
+
+    useEffect(() => {
+        fetch('/api/enterprise/system-settings/notification_bar/public')
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d) setConfig(d); })
+            .catch(() => { });
+    }, []);
+
+    // Check sessionStorage for dismissal (keyed by text so new messages re-show)
+    useEffect(() => {
+        if (config?.text) {
+            const key = `notification_bar_dismissed_${btoa(encodeURIComponent(config.text))}`;
+            if (sessionStorage.getItem(key)) setDismissed(true);
+        }
+    }, [config?.text]);
+
+    if (!config?.enabled || !config?.text || dismissed) return null;
+
+    const handleDismiss = () => {
+        const key = `notification_bar_dismissed_${btoa(encodeURIComponent(config.text))}`;
+        sessionStorage.setItem(key, '1');
+        setDismissed(true);
+    };
+
+    return (
+        <div className="notification-bar">
+            <span className="notification-bar-text">{config.text}</span>
+            <button className="notification-bar-close" onClick={handleDismiss} aria-label="Close">✕</button>
+        </div>
+    );
+}
+
 export default function App() {
     const { token, setAuth, user } = useAuthStore();
     const [loading, setLoading] = useState(true);
@@ -38,6 +74,21 @@ export default function App() {
         }
     }, []);
 
+    // Toggle has-notification-bar class on body for layout adjustments
+    const [showBar, setShowBar] = useState(false);
+    useEffect(() => {
+        fetch('/api/enterprise/system-settings/notification_bar/public')
+            .then(r => r.ok ? r.json() : null)
+            .then(d => {
+                if (d?.enabled && d?.text) {
+                    setShowBar(true);
+                    document.body.classList.add('has-notification-bar');
+                }
+            })
+            .catch(() => { });
+        return () => { document.body.classList.remove('has-notification-bar'); };
+    }, []);
+
     if (loading) {
         return (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: 'var(--text-tertiary)' }}>
@@ -47,19 +98,22 @@ export default function App() {
     }
 
     return (
-        <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-                <Route index element={<Navigate to="/plaza" replace />} />
-                <Route path="dashboard" element={<Dashboard />} />
-                <Route path="plaza" element={<Plaza />} />
-                <Route path="agents/new" element={<AgentCreate />} />
-                <Route path="agents/:id" element={<AgentDetail />} />
-                <Route path="agents/:id/chat" element={<Chat />} />
-                <Route path="messages" element={<Messages />} />
-                <Route path="enterprise" element={<EnterpriseSettings />} />
-                <Route path="invitations" element={<InvitationCodes />} />
-            </Route>
-        </Routes>
+        <>
+            <NotificationBar />
+            <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+                    <Route index element={<Navigate to="/plaza" replace />} />
+                    <Route path="dashboard" element={<Dashboard />} />
+                    <Route path="plaza" element={<Plaza />} />
+                    <Route path="agents/new" element={<AgentCreate />} />
+                    <Route path="agents/:id" element={<AgentDetail />} />
+                    <Route path="agents/:id/chat" element={<Chat />} />
+                    <Route path="messages" element={<Messages />} />
+                    <Route path="enterprise" element={<EnterpriseSettings />} />
+                    <Route path="invitations" element={<InvitationCodes />} />
+                </Route>
+            </Routes>
+        </>
     );
 }

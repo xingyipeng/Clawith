@@ -173,6 +173,25 @@ async def call_llm(
 
     # Tool-calling loop (configurable per agent, default 50)
     for round_i in range(_max_tool_rounds):
+        # ── Dynamic tool-call limit warning (Pulse engine) ──
+        # Don't tell the agent about limits at the start — only warn when approaching.
+        # This prevents models from rushing to complete tasks prematurely.
+        _warn_threshold_80 = int(_max_tool_rounds * 0.8)
+        _warn_threshold_96 = _max_tool_rounds - 2
+        if round_i == _warn_threshold_80:
+            api_messages.append({
+                "role": "system",
+                "content": (
+                    f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
+                    "如果当前任务尚未完成，请尽快保存进度到 agenda.md，"
+                    "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
+                ),
+            })
+        elif round_i == _warn_threshold_96:
+            api_messages.append({
+                "role": "system",
+                "content": f"🚨 仅剩 2 轮工具调用。请立即保存进度到 agenda.md 并设置续接触发器。",
+            })
         payload = {
             "model": model.model,
             "messages": api_messages,
@@ -627,7 +646,13 @@ async def websocket_chat(
                 if _sess:
                     _sess.last_message_at = _now
                     if not history_messages and _sess.title.startswith("Session "):
-                        _sess.title = content[:40]
+                        # Use display_content for title (avoids raw base64/markers)
+                        title_src = display_content if display_content else content
+                        # Clean up common prefixes from image/file messages
+                        clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
+                        if file_name and not clean_title:
+                            clean_title = f"📎 {file_name}"
+                        _sess.title = clean_title[:40] if clean_title else content[:40]
                 await db.commit()
             print("[WS] User message saved")
 
