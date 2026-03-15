@@ -221,6 +221,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
         message = event.get("message", {})
         sender = event.get("sender", {}).get("sender_id", {})
         sender_open_id = sender.get("open_id", "")
+        sender_user_id_from_event = sender.get("user_id", "")  # tenant-stable ID, available directly in event body
         msg_type = message.get("message_type", "text")
         chat_type = message.get("chat_type", "p2p")  # p2p or group
         chat_id = message.get("chat_id", "")
@@ -358,7 +359,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             import httpx as _httpx
 
             sender_name = ""
-            sender_user_id_feishu = ""  # tenant-level user_id (consistent across apps)
+            sender_user_id_feishu = sender_user_id_from_event  # tenant-level user_id, pre-filled from event body
             platform_user_id = creator_id  # fallback
 
             try:
@@ -395,8 +396,13 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                                             _existing = _cj.loads(_cache.read_text())
                                         except Exception:
                                             pass
-                                    _users = {u["open_id"]: u for u in _existing.get("users", [])}
-                                    _users[sender_open_id] = {
+                                    # Key by user_id when available (tenant-stable), fallback to open_id
+                                    _users = {}
+                                    for _u in _existing.get("users", []):
+                                        _key = _u.get("user_id") or _u.get("open_id", "")
+                                        _users[_key] = _u
+                                    _cache_key = sender_user_id_feishu or sender_open_id
+                                    _users[_cache_key] = {
                                         "open_id": sender_open_id,
                                         "name": sender_name,
                                         "email": sender_email,
