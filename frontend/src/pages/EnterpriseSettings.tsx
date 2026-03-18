@@ -512,9 +512,25 @@ function SkillsTab() {
                     border: '1px solid var(--border-primary)',
                     background: 'var(--bg-secondary, rgba(255,255,255,0.02))',
                 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>GitHub Token</div>
+                    <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        GitHub Token
+                        <span className="metric-tooltip-trigger" style={{ display: 'inline-flex', alignItems: 'center', cursor: 'help', color: 'var(--text-tertiary)' }}>
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6.5" /><path d="M8 7v4M8 5.5v0" /></svg>
+                            <span className="metric-tooltip" style={{ width: '300px', bottom: 'auto', top: 'calc(100% + 6px)', left: '-8px', fontWeight: 400 }}>
+                                <div style={{ marginBottom: '6px', fontWeight: 500 }}>How to generate a GitHub Token:</div>
+                                1. Go to github.com &rarr; Settings &rarr; Developer settings<br/>
+                                2. Click "Personal access tokens" &rarr; "Tokens (classic)"<br/>
+                                3. Click "Generate new token (classic)"<br/>
+                                4. Set a name and expiration, no scopes needed for public repos<br/>
+                                5. Click "Generate token" and copy the value<br/>
+                                <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                    Or visit: github.com/settings/tokens
+                                </div>
+                            </span>
+                        </span>
+                    </div>
                     <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                        Configure a GitHub personal access token to increase API rate limits (60/hr → 5,000/hr) when importing skills from ClawHub or GitHub.
+                        Increases GitHub API rate limits from 60/hr to 5,000/hr for skill imports.
                     </p>
                     {tokenStatus?.configured && (
                         <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
