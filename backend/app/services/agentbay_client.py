@@ -143,10 +143,61 @@ class AgentBayClient:
         await self._ensure_browser_initialized()
 
         from agentbay import ActOptions
-        # Explicitly instruct the agent to click and use keyboard, to correctly trigger React/Vue events.
-        action_msg = f"Click on the element matching '{selector}' to focus it, then use the keyboard to type the text '{text}' character by character. This ensures modern web frameworks like React register the input."
+
+        # Detect OTP/PIN-style inputs: short digit-only strings (4-8 chars)
+        # These use segmented input boxes that auto-advance focus per digit,
+        # so character-by-character typing often fails. Use paste strategy instead.
+        is_otp = text.isdigit() and 4 <= len(text) <= 8
+
+        if is_otp:
+            action_msg = (
+                f"The text '{text}' appears to be a verification/OTP code. "
+                f"Find the verification code input area near '{selector}'. "
+                f"Click on the first input box, then paste or type the full code '{text}'. "
+                f"If the input is split into individual digit boxes, click the first box "
+                f"and type each digit one at a time: {', '.join(text)}. "
+                f"Each box should auto-advance to the next after entering a digit."
+            )
+        else:
+            # Standard input: click to focus, then type character by character
+            # to correctly trigger React/Vue input events.
+            action_msg = (
+                f"Click on the element matching '{selector}' to focus it, "
+                f"then use the keyboard to type the text '{text}' character by character. "
+                f"This ensures modern web frameworks like React register the input."
+            )
+
         await asyncio.to_thread(self._session.browser.operator.act, ActOptions(action=action_msg))
         return {"success": True, "selector": selector, "text": text}
+
+    async def browser_login(self, url: str, login_config: str) -> dict:
+        """Perform an automated login using AgentBay's built-in login skill.
+
+        This leverages AgentBay's AI-driven login capability to handle complex
+        login flows including CAPTCHAs, OTP inputs, and multi-step authentication.
+
+        Args:
+            url: The login page URL to navigate to first.
+            login_config: JSON string with login configuration, e.g.
+                          '{"api_key": "xxx", "skill_id": "yyy"}'
+        """
+        if not self._session or self._image_type != "browser":
+            await self.create_session("browser_latest")
+        await self._ensure_browser_initialized()
+
+        # Navigate to the login page first
+        await asyncio.to_thread(self._session.browser.operator.navigate, url)
+
+        # Execute the login skill
+        result = await asyncio.to_thread(
+            self._session.browser.operator.login,
+            login_config,
+            use_vision=True,
+        )
+        return {
+            "success": result.success,
+            "message": result.message or "",
+        }
 
     # ─── Code Operations ──────────────────────────
 

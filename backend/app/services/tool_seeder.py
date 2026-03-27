@@ -1120,6 +1120,24 @@ AGENTBAY_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        "name": "agentbay_browser_login",
+        "display_name": "AgentBay: Browser Login",
+        "description": "Use AgentBay's AI-driven login skill to automate complex login flows (CAPTCHAs, OTP, multi-step auth). Requires AgentBay skill credentials (api_key + skill_id).",
+        "category": "agentbay",
+        "icon": "🔐",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The login page URL to navigate to"},
+                "login_config": {"type": "string", "description": "JSON string with login config"},
+            },
+            "required": ["url", "login_config"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
     # ── Command (Shell) ───────────────────────────────────────────────────
     {
         "name": "agentbay_command_exec",
