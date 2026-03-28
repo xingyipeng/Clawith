@@ -175,6 +175,7 @@ export default function Chat() {
 
                 // ── AgentBay live preview events ──
                 if (data.type === 'agentbay_live') {
+                    console.log('[LivePreview] Received:', data.env, 'screenshot:', !!data.screenshot, 'len:', data.screenshot?.length || 0);
                     setLiveState(prev => {
                         const next = { ...prev };
                         if (data.env === 'desktop' && data.screenshot) {
