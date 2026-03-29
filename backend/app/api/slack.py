@@ -246,8 +246,8 @@ async def slack_event_webhook(
     import uuid as _uuid2
     _slack_username = f"slack_{sender_id}"
     query = select(_User).where(_User.username == _slack_username)
-    if _agent and _agent.tenant_id:
-        query = query.where(_User.tenant_id == _agent.tenant_id)
+    if agent_obj and agent_obj.tenant_id:
+        query = query.where(_User.tenant_id == agent_obj.tenant_id)
 
     _u_r = await db.execute(query)
     _u = _u_r.scalar_one_or_none()
@@ -277,8 +277,8 @@ async def slack_event_webhook(
         except Exception as _e_info:
             logger.error(f"[Slack] Failed to fetch user info for {sender_id}: {_e_info}")
 
-    if not _platform_user:
-        _platform_user = _User(
+    if not _u:
+        _u = _User(
             username=_slack_username,
             email=f"{_slack_username}@slack.local",
             password_hash=_hp(_uuid2.uuid4().hex),
@@ -289,11 +289,11 @@ async def slack_event_webhook(
         )
 
         await db.flush()
-    elif _slack_real_name and _platform_user.display_name.startswith("Slack User "):
+    elif _slack_real_name and _u.display_name.startswith("Slack User "):
         # Update display_name if we now have the real name
-        _platform_user.display_name = _slack_real_name
+        _u.display_name = _slack_real_name
         await db.flush()
-    platform_user_id = _platform_user.id
+    platform_user_id = _u.id
 
     # Find-or-create session for this Slack conversation
     sess = await find_or_create_channel_session(
