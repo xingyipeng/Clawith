@@ -458,8 +458,3 @@ class RegistrationService:
 
 # Global registration service
 registration_service = RegistrationService()
-h()
-
-
-# Global registration service
-registration_service = RegistrationService()
