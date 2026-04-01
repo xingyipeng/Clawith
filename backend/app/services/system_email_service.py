@@ -20,14 +20,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, make_msgid
 
-from app.config import get_settings
 from app.core.email import force_ipv4, send_smtp_email
 
 logger = logging.getLogger(__name__)
-
-
-class SystemEmailConfigError(RuntimeError):
-    """Raised when system email configuration is missing or invalid."""
 
 
 @dataclass(slots=True)
@@ -53,30 +48,7 @@ class BroadcastEmailRecipient:
     body: str
 
 
-def get_system_email_config() -> SystemEmailConfig:
-    """Get platform-level fallback email configuration from environment variables."""
-    from app.config import get_settings
-    settings = get_settings()
-    
-    from_address = str(getattr(settings, "SYSTEM_EMAIL_FROM_ADDRESS", "")).strip()
-    smtp_host = str(getattr(settings, "SYSTEM_SMTP_HOST", "")).strip()
-    smtp_password = str(getattr(settings, "SYSTEM_SMTP_PASSWORD", ""))
-    
-    if not from_address or not smtp_host or not smtp_password:
-        raise SystemEmailConfigError(
-            "System email is not configured. Set SYSTEM_EMAIL_FROM_ADDRESS, SYSTEM_SMTP_HOST, and SYSTEM_SMTP_PASSWORD."
-        )
 
-    return SystemEmailConfig(
-        from_address=from_address,
-        from_name=str(getattr(settings, "SYSTEM_EMAIL_FROM_NAME", "Clawith")).strip() or "Clawith",
-        smtp_host=smtp_host,
-        smtp_port=int(getattr(settings, "SYSTEM_SMTP_PORT", 465)),
-        smtp_username=str(getattr(settings, "SYSTEM_SMTP_USERNAME", "")).strip() or from_address,
-        smtp_password=smtp_password,
-        smtp_ssl=bool(getattr(settings, "SYSTEM_SMTP_SSL", True)),
-        smtp_timeout_seconds=max(1, int(getattr(settings, "SYSTEM_SMTP_TIMEOUT_SECONDS", 15))),
-    )
 
 
 async def resolve_email_config_async(db) -> SystemEmailConfig | None:
@@ -107,11 +79,7 @@ async def resolve_email_config_async(db) -> SystemEmailConfig | None:
     except Exception as e:
         logger.warning(f"Error resolving platform email config: {e}")
 
-    # 2. Fallback to environment variables
-    try:
-        return get_system_email_config()
-    except SystemEmailConfigError:
-        return None
+    return None
 
 
 async def send_system_email(to: str, subject: str, body: str, db=None) -> None:
