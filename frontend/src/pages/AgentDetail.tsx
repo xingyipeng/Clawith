@@ -766,18 +766,24 @@ if (typeof document !== 'undefined' && !document.getElementById(_PULSE_STYLE_ID)
 }
 
 /**
- * AgentChatToolChain — renders a group of consecutive tool_call messages
- * as a single collapsible card with a pulse LED in the header when running.
+ * AgentChatToolChain — controlled collapsible card for a group of tool_call messages.
  *
- * Each item in `calls` corresponds to one tool_call ChatMsg with:
- *   toolName, toolArgs, toolStatus ('running'|'done'), toolResult
+ * IMPORTANT: This component is CONTROLLED (expanded + onToggle from parent)
+ * to avoid losing state when the parent re-renders during WS streaming.
+ * Each sub-item in the expanded view is independently collapsible via <details>.
  */
 interface ToolCallItem { name: string; args: any; status: 'running' | 'done'; result?: string; }
-function AgentChatToolChain({ calls, t }: { calls: ToolCallItem[]; t: (k: string) => string }) {
-    const [expanded, setExpanded] = useState(false);
+function AgentChatToolChain({
+    calls, t, expanded, onToggle,
+}: {
+    calls: ToolCallItem[];
+    t: (k: string) => string;
+    expanded: boolean;
+    onToggle: () => void;
+}) {
     const count = calls.length;
 
-    // Last tool that is still running (no result yet)
+    // Last tool that is still running
     const activeIdx = (() => {
         for (let i = calls.length - 1; i >= 0; i--) {
             if (calls[i].status === 'running') return i;
@@ -788,10 +794,7 @@ function AgentChatToolChain({ calls, t }: { calls: ToolCallItem[]; t: (k: string
     const activeTool = isRunning ? calls[activeIdx] : null;
 
     return (
-        <div style={{
-            paddingLeft: '36px',
-            marginBottom: '6px',
-        }}>
+        <div style={{ paddingLeft: '36px', marginBottom: '6px' }}>
             <div style={{
                 borderRadius: '8px',
                 background: 'rgba(99,102,241,0.06)',
@@ -800,9 +803,9 @@ function AgentChatToolChain({ calls, t }: { calls: ToolCallItem[]; t: (k: string
                 overflow: 'hidden',
                 transition: 'border-color 0.3s ease',
             }}>
-                {/* ── Header toggle ── */}
+                {/* ── Header toggle (calls parent onToggle, no internal state) ── */}
                 <button
-                    onClick={() => setExpanded(v => !v)}
+                    onClick={onToggle}
                     style={{
                         background: 'none', border: 'none', cursor: 'pointer',
                         width: '100%', display: 'flex', alignItems: 'center', gap: '6px',
@@ -828,7 +831,6 @@ function AgentChatToolChain({ calls, t }: { calls: ToolCallItem[]; t: (k: string
                                 }}>{activeTool.name}</span>
                             </>
                         ) : (
-                            /* Static green dot when all done */
                             <span style={{
                                 display: 'inline-block', width: '6px', height: '6px',
                                 borderRadius: '50%', background: '#22c55e', flexShrink: 0, opacity: 0.85,
@@ -879,20 +881,31 @@ function AgentChatToolChain({ calls, t }: { calls: ToolCallItem[]; t: (k: string
                     </div>
                 )}
 
-                {/* ── Expanded: full detail for each tool ── */}
+                {/* ── Expanded: each tool as its own <details> (native browser collapse) ── */}
                 {expanded && (
                     <div style={{ borderTop: '1px solid rgba(99,102,241,0.15)' }}>
                         {calls.map((tc, i) => {
                             const running = tc.status === 'running';
                             const argsStr = tc.args && Object.keys(tc.args).length > 0
                                 ? JSON.stringify(tc.args, null, 2) : '';
+                            const hasDetail = !!(argsStr || tc.result);
                             return (
-                                <div key={i} style={{
-                                    padding: '7px 10px',
-                                    borderBottom: i < calls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
-                                }}>
-                                    {/* Tool name row with status dot */}
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: argsStr || tc.result ? '4px' : 0 }}>
+                                <details
+                                    key={i}
+                                    open={running} // auto-open running items
+                                    style={{
+                                        borderBottom: i < calls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                                    }}
+                                >
+                                    {/* Summary row = tool name + status dot + chevron */}
+                                    <summary
+                                        style={{
+                                            padding: '7px 10px',
+                                            display: 'flex', alignItems: 'center', gap: '5px',
+                                            cursor: hasDetail ? 'pointer' : 'default',
+                                            listStyle: 'none', userSelect: 'none',
+                                        }}
+                                    >
                                         <span
                                             className={running ? 'cw-running-led' : undefined}
                                             style={{
@@ -902,37 +915,44 @@ function AgentChatToolChain({ calls, t }: { calls: ToolCallItem[]; t: (k: string
                                                 flexShrink: 0,
                                             }}
                                         />
-                                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600 }}>
+                                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600, flex: 1 }}>
                                             {tc.name}
                                         </span>
                                         {running && (
-                                            <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+                                            <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>
                                                 {t('common.loading')}
                                             </span>
                                         )}
-                                    </div>
-                                    {/* Args block */}
-                                    {argsStr && (
-                                        <div style={{
-                                            fontFamily: 'var(--font-mono)', fontSize: '10px',
-                                            color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
-                                            wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
-                                            background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
-                                            padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
-                                        }}>{argsStr}</div>
-                                    )}
-                                    {/* Result block */}
-                                    {tc.result && (
-                                        <div style={{
-                                            fontSize: '10px', color: 'var(--text-secondary)',
-                                            whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                                            maxHeight: '120px', overflowY: 'auto',
-                                            borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
-                                        }}>
-                                            {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
+                                        {hasDetail && (
+                                            <span style={{ fontSize: '9px', color: 'var(--text-tertiary)' }}>▶</span>
+                                        )}
+                                    </summary>
+                                    {/* Detail content: args + result */}
+                                    {hasDetail && (
+                                        <div style={{ padding: '0 10px 8px 20px' }}>
+                                            {argsStr && (
+                                                <div style={{
+                                                    fontFamily: 'var(--font-mono)', fontSize: '10px',
+                                                    color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
+                                                    wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
+                                                    background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
+                                                    padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
+                                                }}>{argsStr}</div>
+                                            )}
+                                            {tc.result && (
+                                                <div style={{
+                                                    fontSize: '10px', color: 'var(--text-secondary)',
+                                                    whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                                                    maxHeight: '120px', overflowY: 'auto',
+                                                    borderTop: argsStr ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                                                    paddingTop: argsStr ? '4px' : 0,
+                                                }}>
+                                                    {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
+                                                </div>
+                                            )}
                                         </div>
                                     )}
-                                </div>
+                                </details>
                             );
                         })}
                     </div>
@@ -1686,6 +1706,15 @@ function AgentDetailInner() {
     };
     interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; thinking?: string; imageUrl?: string; timestamp?: string; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+    // Stable expanded-state map for tool groups — keyed by groupStartIndex.
+    // Stored in a ref so it survives parent re-renders without causing extra renders.
+    const toolGroupExpandedRef = useRef<Map<number, boolean>>(new Map());
+    const [toolGroupExpandedVersion, setToolGroupExpandedVersion] = useState(0);
+    const toggleToolGroup = (key: number) => {
+        const m = toolGroupExpandedRef.current;
+        m.set(key, !m.get(key));
+        setToolGroupExpandedVersion(v => v + 1); // trigger re-render
+    };
     const [liveState, setLiveState] = useState<LivePreviewState>({});
     const [livePanelVisible, setLivePanelVisible] = useState(false);
     const [wsSessionId, setWsSessionId] = useState<string>('');
@@ -4394,6 +4423,8 @@ function AgentDetailInner() {
                                                                 key={`tg-${entry.key}`}
                                                                 calls={entry.calls}
                                                                 t={t}
+                                                                expanded={!!toolGroupExpandedRef.current.get(entry.key)}
+                                                                onToggle={() => toggleToolGroup(entry.key)}
                                                             />
                                                         );
                                                     }

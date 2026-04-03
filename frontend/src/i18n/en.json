@@ -398,7 +398,7 @@
       "thinking": "Thinking...",
       "collapseSessions": "Collapse sessions",
       "showSessions": "Show chat sessions",
-      "toolCallChain": "Steps Taken"
+      "toolCallChain": "Tools Used"
     },
     "activityLog": {
       "title": "Activity Log",
