@@ -55,19 +55,47 @@ interface Message {
     _isToolGroup?: boolean;
 }
 
+// CSS keyframe for the pulse/breathing LED — injected once into <head>
+const PULSE_STYLE_ID = 'cw-tool-pulse-style';
+if (typeof document !== 'undefined' && !document.getElementById(PULSE_STYLE_ID)) {
+    const s = document.createElement('style');
+    s.id = PULSE_STYLE_ID;
+    s.textContent = `
+        @keyframes cw-pulse-led {
+            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(99,102,241,0.6); }
+            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(99,102,241,0); }
+        }
+        .cw-running-led { animation: cw-pulse-led 1.4s ease-in-out infinite; }
+    `;
+    document.head.appendChild(s);
+}
+
 function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
     const { t } = useTranslation();
     const [expanded, setExpanded] = useState(false);
     const count = toolCalls.length;
+
+    // Find the last tool without a result — that is the currently-executing one.
+    const activeIdx = (() => {
+        for (let i = toolCalls.length - 1; i >= 0; i--) {
+            if (!toolCalls[i].result) return i;
+        }
+        return -1; // -1 = all done
+    })();
+    const isRunning = activeIdx >= 0;
+    const activeTool = isRunning ? toolCalls[activeIdx] : null;
+
     return (
         <div style={{
             borderRadius: '8px',
             background: 'rgba(99,102,241,0.06)',
-            border: '1px solid rgba(99,102,241,0.18)',
+            border: `1px solid ${isRunning ? 'rgba(99,102,241,0.32)' : 'rgba(99,102,241,0.18)'}`,
             fontSize: '12px',
             overflow: 'hidden',
             marginBottom: '6px',
+            transition: 'border-color 0.3s ease',
         }}>
+            {/* ── Header / toggle row ── */}
             <button
                 onClick={() => setExpanded(v => !v)}
                 style={{
@@ -78,73 +106,155 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                 }}
             >
                 {Icons.tool}
-                <span style={{ flex: 1, textAlign: 'left', fontWeight: 500 }}>
-                    {t('agent.chat.toolCallChain')}
+
+                {/* Left label: title + running-tool indicator */}
+                <span style={{ flex: 1, textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                    <span style={{ fontWeight: 500, flexShrink: 0 }}>{t('agent.chat.toolCallChain')}</span>
+                    <span style={{ color: 'rgba(99,102,241,0.4)', flexShrink: 0 }}>·</span>
+                    {isRunning && activeTool ? (
+                        <>
+                            {/* Pulse LED: breathing dot while a tool runs */}
+                            <span
+                                className="cw-running-led"
+                                style={{
+                                    display: 'inline-block',
+                                    width: '6px', height: '6px',
+                                    borderRadius: '50%',
+                                    background: '#818cf8',
+                                    flexShrink: 0,
+                                }}
+                            />
+                            {/* Currently-running tool name */}
+                            <span style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '11px',
+                                color: '#a5b4fc',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                            }}>
+                                {activeTool.name}
+                            </span>
+                        </>
+                    ) : (
+                        /* Static green dot when all tools are done */
+                        <span style={{
+                            display: 'inline-block',
+                            width: '6px', height: '6px',
+                            borderRadius: '50%',
+                            background: '#22c55e',
+                            flexShrink: 0,
+                            opacity: 0.85,
+                        }} />
+                    )}
                 </span>
+
+                {/* Count badge */}
                 <span style={{
                     background: 'rgba(99,102,241,0.18)', color: '#818cf8',
                     borderRadius: '10px', padding: '1px 7px',
-                    fontSize: '10px', fontWeight: 600, marginRight: '2px',
+                    fontSize: '10px', fontWeight: 600, flexShrink: 0,
                 }}>
                     {count}
                 </span>
+
+                {/* Expand chevron */}
                 <span style={{
                     fontSize: '10px', color: 'var(--text-tertiary)',
                     transition: 'transform 0.2s', display: 'inline-block',
                     transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                    flexShrink: 0,
                 }}>▶</span>
             </button>
+
+            {/* ── Collapsed: pills with individual run-state dots ── */}
             {!expanded && count > 0 && (
                 <div style={{ padding: '0 10px 7px 10px', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                    {toolCalls.map((tc, i) => (
-                        <span key={i} style={{
-                            background: 'rgba(99,102,241,0.10)',
-                            border: '1px solid rgba(99,102,241,0.15)',
-                            borderRadius: '4px', padding: '1px 6px',
-                            fontSize: '10px', color: '#a5b4fc',
-                            fontFamily: 'var(--font-mono)',
-                        }}>
-                            {tc.name}
-                        </span>
-                    ))}
+                    {toolCalls.map((tc, i) => {
+                        const running = !tc.result;
+                        return (
+                            <span key={i} style={{
+                                background: running ? 'rgba(99,102,241,0.14)' : 'rgba(99,102,241,0.08)',
+                                border: `1px solid ${running ? 'rgba(99,102,241,0.28)' : 'rgba(99,102,241,0.14)'}`,
+                                borderRadius: '4px', padding: '1px 6px',
+                                fontSize: '10px', color: running ? '#818cf8' : '#a5b4fc',
+                                fontFamily: 'var(--font-mono)',
+                                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                            }}>
+                                {running && (
+                                    <span
+                                        className="cw-running-led"
+                                        style={{
+                                            display: 'inline-block',
+                                            width: '4px', height: '4px',
+                                            borderRadius: '50%',
+                                            background: '#818cf8',
+                                            flexShrink: 0,
+                                        }}
+                                    />
+                                )}
+                                {tc.name}
+                            </span>
+                        );
+                    })}
                 </div>
             )}
+
+            {/* ── Expanded: each tool's full detail row ── */}
             {expanded && (
                 <div style={{ borderTop: '1px solid rgba(99,102,241,0.15)' }}>
-                    {toolCalls.map((tc, i) => (
-                        <div key={i} style={{
-                            padding: '7px 10px',
-                            borderBottom: i < toolCalls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
-                                <span style={{ width: '4px', height: '4px', borderRadius: '50%', background: '#818cf8', flexShrink: 0 }} />
-                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600 }}>
-                                    {tc.name}
-                                </span>
+                    {toolCalls.map((tc, i) => {
+                        const running = !tc.result;
+                        return (
+                            <div key={i} style={{
+                                padding: '7px 10px',
+                                borderBottom: i < toolCalls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
+                                    {/* Status dot: amber + pulse = running; green = done */}
+                                    <span
+                                        className={running ? 'cw-running-led' : undefined}
+                                        style={{
+                                            display: 'inline-block',
+                                            width: '5px', height: '5px',
+                                            borderRadius: '50%',
+                                            background: running ? '#f59e0b' : '#22c55e',
+                                            flexShrink: 0,
+                                        }}
+                                    />
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600 }}>
+                                        {tc.name}
+                                    </span>
+                                    {running && (
+                                        <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+                                            {t('common.loading')}
+                                        </span>
+                                    )}
+                                </div>
+                                {tc.args && Object.keys(tc.args).length > 0 && (
+                                    <div style={{
+                                        fontFamily: 'var(--font-mono)', fontSize: '10px',
+                                        color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
+                                        wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
+                                        background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
+                                        padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
+                                    }}>
+                                        {JSON.stringify(tc.args, null, 2)}
+                                    </div>
+                                )}
+                                {tc.result && (
+                                    <div style={{
+                                        fontSize: '10px', color: 'var(--text-secondary)',
+                                        whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                                        maxHeight: '80px', overflowY: 'auto',
+                                        borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
+                                    }}>
+                                        {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
+                                    </div>
+                                )}
                             </div>
-                            {tc.args && Object.keys(tc.args).length > 0 && (
-                                <div style={{
-                                    fontFamily: 'var(--font-mono)', fontSize: '10px',
-                                    color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
-                                    wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
-                                    background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
-                                    padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
-                                }}>
-                                    {JSON.stringify(tc.args, null, 2)}
-                                </div>
-                            )}
-                            {tc.result && (
-                                <div style={{
-                                    fontSize: '10px', color: 'var(--text-secondary)',
-                                    whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                                    maxHeight: '80px', overflowY: 'auto',
-                                    borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
-                                }}>
-                                    {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
-                                </div>
-                            )}
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
         </div>
