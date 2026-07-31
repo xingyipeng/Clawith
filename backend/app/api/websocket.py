@@ -121,6 +121,7 @@ async def call_llm(
     on_tool_call=None,
     on_thinking=None,
     supports_vision=False,
+    execution_mode: str = "chat",
 ) -> str:
     """Call LLM via unified client with function-calling tool loop.
 
@@ -163,7 +164,7 @@ async def call_llm(
                     _current_user_name = _u.display_name or _u.username
         except Exception:
             pass
-    static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_current_user_name)
+    static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_current_user_name, execution_mode=execution_mode)
 
     # Load tools dynamically from DB
     tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
@@ -235,182 +236,57 @@ async def call_llm(
 
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
 
-    # ── Per-round token accumulator ──
-    from app.services.token_tracker import record_token_usage, extract_usage_tokens, estimate_tokens_from_chars
-    _accumulated_tokens = 0
-
-    # Tool-calling loop (configurable per agent, default 50)
-    for round_i in range(_max_tool_rounds):
-        # ── Dynamic tool-call limit warning (Aware engine) ──
-        # Don't tell the agent about limits at the start — only warn when approaching.
-        # This prevents models from rushing to complete tasks prematurely.
-        _warn_threshold_80 = int(_max_tool_rounds * 0.8)
-        _warn_threshold_96 = _max_tool_rounds - 2
-        if round_i == _warn_threshold_80:
-            api_messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
-                    "如果当前任务尚未完成，请尽快保存进度到 focus.md，"
-                    "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
-                ),
-            ))
-        elif round_i == _warn_threshold_96:
-            api_messages.append(LLMMessage(
-                role="user",
-                content=f"🚨 仅剩 2 轮工具调用。请立即保存进度到 focus.md 并设置续接触发器。",
-            ))
-
-        try:
-            # Use streaming API for real-time responses
-            response = await client.stream(
-                messages=api_messages,
-                tools=tools_for_llm if tools_for_llm else None,
-                temperature=model.temperature,
-                max_tokens=max_tokens,
-                on_chunk=on_chunk,
-                on_thinking=on_thinking,
-            )
-        except LLMError as e:
-            # Record accumulated tokens before returning error
-            logger.error(
-                f"[LLM] LLMError provider={getattr(model, 'provider', '?')} "
-                f"model={getattr(model, 'model', '?')} round={round_i + 1}: {e}"
-            )
-            if agent_id and _accumulated_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_tokens)
-            return f"[LLM Error] {e}"
-        except Exception as e:
-            logger.error(
-                f"[LLM] Unexpected error provider={getattr(model, 'provider', '?')} "
-                f"model={getattr(model, 'model', '?')} round={round_i + 1}: "
-                f"{type(e).__name__}: {str(e)[:300]}"
-            )
-            if agent_id and _accumulated_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_tokens)
-            return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
-
-        # ── Track tokens for this round ──
-        logger.debug(f"[LLM] stream() returned: {len(response.content or '')} chars, finish={response.finish_reason}, tools={len(response.tool_calls or [])}")
-        real_tokens = extract_usage_tokens(response.usage)
-        if real_tokens:
-            _accumulated_tokens += real_tokens
-        else:
-            round_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages) + len(response.content or '')
-            _accumulated_tokens += estimate_tokens_from_chars(round_chars)
-
-        # If no tool calls, return the final content
-        if not response.tool_calls:
-            if agent_id and _accumulated_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_tokens)
-            await client.close()
-            return response.content or "[LLM returned empty content]"
-
-        # Execute tool calls
-        logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s), finish_reason={response.finish_reason}")
-
-        # Add assistant message with tool calls
-        api_messages.append(LLMMessage(
-            role="assistant",
-            content=response.content or None,
-            tool_calls=[{
-                "id": tc["id"],
-                "type": "function",
-                "function": tc["function"],
-            } for tc in response.tool_calls],
-            reasoning_content=response.reasoning_content,
-        ))
-
-        full_reasoning_content = response.reasoning_content or ""
-
-        # Tools that require arguments — if LLM sends empty args, skip and ask to retry
-        _TOOLS_REQUIRING_ARGS = {"write_file", "read_file", "delete_file", "read_document", "send_message_to_agent", "send_feishu_message", "send_email"}
-
-        for tc in response.tool_calls:
-            fn = tc["function"]
-            tool_name = fn["name"]
-            raw_args = fn.get("arguments", "{}")
-            logger.info(f"[LLM] Raw arguments for {tool_name} (len={len(raw_args)}): {repr(raw_args[:300])}")
+    # ── Vision tool result filter (screenshot injection) ──
+    tool_result_filter = None
+    if supports_vision and agent_id:
+        async def _vision_filter(tool_name: str, result: str, args: dict) -> str | list:
             try:
-                args = json.loads(raw_args) if raw_args else {}
-            except json.JSONDecodeError:
-                args = {}
+                from app.services.vision_inject import try_inject_screenshot_vision
+                from app.services.agent_tools import WORKSPACE_ROOT
+                ws_path = WORKSPACE_ROOT / str(agent_id)
+                vision_content = try_inject_screenshot_vision(tool_name, result, ws_path)
+                if vision_content:
+                    logger.info(f"[LLM] Injected screenshot vision for {tool_name}")
+                    return vision_content
+            except Exception as e:
+                logger.warning(f"[LLM] Vision injection failed for {tool_name}: {e}")
+            return result
+        tool_result_filter = _vision_filter
 
-            # Guard: if a tool that requires arguments received empty args,
-            # return an error to LLM instead of executing (Claude sometimes
-            # emits tool_use blocks with no input_json_delta events)
-            if not args and tool_name in _TOOLS_REQUIRING_ARGS:
-                logger.warning(f"[LLM] Empty arguments for {tool_name}, asking LLM to retry")
-                api_messages.append(LLMMessage(
-                    role="tool",
-                    content=f"Error: {tool_name} was called with empty arguments. You must provide the required parameters. Please retry with the correct arguments.",
-                    tool_call_id=tc.get("id", ""),
-                ))
-                continue
+    from app.services.agent_runtime import AgentRuntime, RuntimeConfig
 
-            logger.info(f"[LLM] Calling tool: {tool_name}({args})")
-            # Notify client about tool call (in-progress)
-            if on_tool_call:
-                try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "args": args,
-                        "status": "running",
-                        "reasoning_content": full_reasoning_content
-                    })
-                except Exception:
-                    pass
+    config = RuntimeConfig(
+        agent_id=agent_id,
+        user_id=user_id,
+        session_id=session_id,
+        execution_mode=execution_mode,
+        max_tool_rounds=_max_tool_rounds,
+        use_streaming=True,
+        on_chunk=on_chunk,
+        on_thinking=on_thinking,
+        on_tool_call=on_tool_call,
+        supports_vision=supports_vision,
+        tool_result_filter=tool_result_filter,
+        warn_at_80_percent=True,
+    )
+    runtime = AgentRuntime(
+        client, tools_for_llm or None, execute_tool, config,
+        temperature=model.temperature,
+        max_tokens=max_tokens,
+    )
 
-            result = await execute_tool(
-                tool_name, args,
-                agent_id=agent_id,
-                user_id=user_id or agent_id,
-                session_id=session_id,
-            )
-            logger.debug(f"[LLM] Tool result: {result[:100]}")
+    try:
+        runtime_result = await runtime.run(api_messages)
+    finally:
+        await client.close()
 
-            # Notify client about tool call result
-            if on_tool_call:
-                try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "args": args,
-                        "status": "done",
-                        "result": result,
-                        "reasoning_content": full_reasoning_content
-                    })
-                except Exception as _cb_err:
-                    logger.warning(f"[LLM] on_tool_call callback error: {_cb_err}")
+    # Async memory extraction after chat conversations
+    if agent_id and execution_mode == "chat" and not runtime_result.error:
+        import asyncio as _aio
+        from app.services.memory_extractor import extract_and_consolidate_memory
+        _aio.create_task(extract_and_consolidate_memory(agent_id, agent_name, messages))
 
-            # ── Vision injection for screenshot tools ──
-            # If the model supports vision, try to inject the actual screenshot
-            # image into the tool result so the LLM can SEE what's on screen.
-            # Without this, the LLM only gets text like "Screenshot saved to ..."
-            # and blindly guesses the page content.
-            tool_content: str | list = str(result)
-            if supports_vision and agent_id:
-                try:
-                    from app.services.vision_inject import try_inject_screenshot_vision
-                    from app.services.agent_tools import WORKSPACE_ROOT
-                    ws_path = WORKSPACE_ROOT / str(agent_id)
-                    vision_content = try_inject_screenshot_vision(tool_name, str(result), ws_path)
-                    if vision_content:
-                        tool_content = vision_content
-                        logger.info(f"[LLM] Injected screenshot vision for {tool_name}")
-                except Exception as e:
-                    logger.warning(f"[LLM] Vision injection failed for {tool_name}: {e}")
-
-            api_messages.append(LLMMessage(
-                role="tool",
-                tool_call_id=tc["id"],
-                content=tool_content,
-            ))
-
-    # Record tokens even on "too many rounds" exit
-    if agent_id and _accumulated_tokens > 0:
-        await record_token_usage(agent_id, _accumulated_tokens)
-    await client.close()
-    return "[Error] Too many tool call rounds"
+    return runtime_result.content or "[LLM returned empty content]"
 
 
 @router.websocket("/ws/chat/{agent_id}")
@@ -803,7 +679,7 @@ async def websocket_chat(
                                             "name": data.get("name", ""),
                                             "args": data.get("args"),
                                             "status": "done",
-                                            "result": (data.get("result") or "")[:500],
+                                            "result": (data.get("result") or "")[:3000],
                                             "reasoning_content": data.get("reasoning_content"),
                                         }),
                                         conversation_id=conv_id,

@@ -127,7 +127,8 @@ async def _get_agent_reply(target_agent, message: str, db) -> str | None:
         return None
 
     static_prompt, dynamic_prompt = await build_agent_context(
-        target_agent.id, target_agent.name, target_agent.role_description or ""
+        target_agent.id, target_agent.name, target_agent.role_description or "",
+        execution_mode="task"
     )
 
     messages = [

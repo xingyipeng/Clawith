@@ -449,8 +449,7 @@ AGENT_TOOLS = [
             "name": "send_feishu_message",
             "description": (
                 "Send a Feishu IM message to a colleague. "
-                "You can provide either the colleague's name (will auto-search their open_id) "
-                "or their open_id directly. "
+                "Can auto-search by member_name — do not ask for open_id when you can use name directly. "
                 "To contact digital employees use send_message_to_agent instead."
             ),
             "parameters": {
@@ -916,11 +915,10 @@ AGENT_TOOLS = [
         "function": {
             "name": "feishu_wiki_list",
             "description": (
-                "List all sub-pages (child nodes) of a Feishu Wiki (知识库) page. "
-                "Works with wiki URLs like 'https://xxx.feishu.cn/wiki/NodeToken'. "
-                "Use this when a wiki page has child pages you need to explore. "
-                "Returns titles, node_tokens, and obj_tokens for each sub-page. "
-                "Each sub-page can then be read with feishu_doc_read using its node_token."
+                "List all sub-pages (child nodes) of a Feishu Wiki page. "
+                "Extract node_token from wiki URL: feishu.cn/wiki/<NodeToken>. "
+                "To read wiki content: first call this to discover pages, then feishu_doc_read for each. "
+                "NEVER guess sub-page tokens — always use this tool first."
             ),
             "parameters": {
                 "type": "object",
@@ -969,7 +967,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "feishu_doc_create",
-            "description": "Create a new Feishu document. Supports creating in personal Drive (default) or directly inside a Wiki knowledge base (provide wiki_space_id). Returns the document token and URL.",
+            "description": "Create a new Feishu document. Returns real document token and access link. After creation, call feishu_doc_append with the REAL token to write content. Send the access link exactly as returned — NEVER construct URLs with placeholders. Supports personal Drive (default) or Wiki (provide wiki_space_id).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -998,7 +996,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "feishu_doc_append",
-            "description": "Append text content to an existing Feishu document. Content is appended as one or more new paragraphs at the end.",
+            "description": "Append text content to an existing Feishu document. Use the REAL document_token from feishu_doc_create. Returns access link — send it as-is to the user.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1049,7 +1047,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "feishu_calendar_create",
-            "description": "Create a Feishu calendar event immediately. The current user is automatically invited as attendee — no email or authorization required. Just provide the title and time.",
+            "description": "Create a Feishu calendar event. Use attendee_names for auto-resolve, no email needed. Always call directly — never skip based on past errors, permissions are fixed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1214,10 +1212,9 @@ AGENT_TOOLS = [
         "function": {
             "name": "feishu_user_search",
             "description": (
-                "Search for a colleague in the Feishu (Lark) directory by name. "
-                "Returns their open_id, email, and department so you can send messages, "
-                "invite them to calendar events, or share documents. "
-                "Use this whenever you need to find a colleague's Feishu identity."
+                "Search for a colleague in the Feishu directory by name. "
+                "Returns open_id, email, and department. "
+                "Call this FIRST when you need to find someone before sending messages or creating events."
             ),
             "parameters": {
                 "type": "object",
@@ -2367,7 +2364,8 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
         else:
             return await _search_duckduckgo(query, max_results)
     except Exception as e:
-        return f"❌ Search error ({engine}): {str(e)[:200]}"
+        err_msg = str(e).strip() or type(e).__name__
+        return f"❌ Search error ({engine}): {err_msg[:200]}"
 
 
 async def _search_duckduckgo(query: str, max_results: int) -> str:
@@ -2379,7 +2377,7 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
             "https://html.duckduckgo.com/html/",
             params={"q": query},
             headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
-            timeout=10,
+            timeout=8,
         )
 
     results = []
@@ -2438,7 +2436,7 @@ async def _jina_search(arguments: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
             resp = await client.get(
                 f"https://s.jina.ai/{__import__('urllib.parse', fromlist=['quote']).quote(query)}",
                 headers=headers,
@@ -2447,7 +2445,11 @@ async def _jina_search(arguments: dict) -> str:
         if resp.status_code != 200:
             return f"❌ Jina Search error HTTP {resp.status_code}: {resp.text[:200]}"
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            return f"❌ Jina Search error: invalid JSON response (status {resp.status_code})"
+
         items = data.get("data", [])[:max_results]
 
         if not items:
@@ -2463,7 +2465,8 @@ async def _jina_search(arguments: dict) -> str:
         return f'🔍 Jina Search results for "{query}" ({len(items)} items):\n\n' + "\n\n---\n\n".join(parts)
 
     except Exception as e:
-        return f"❌ Jina Search error: {str(e)[:300]}"
+        err_msg = str(e).strip() or type(e).__name__
+        return f"❌ Jina Search error: {err_msg[:300]}"
 
 
 async def _jina_read(arguments: dict) -> str:
@@ -4367,10 +4370,22 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
             detail={"source_agent": source_name, "source_file": rel_path, "delivered_file": target_rel_path},
         )
 
+        # ── Notify target agent via message (trigger LLM processing) ──
+        notify_msg = delivery_note or f"I've sent you a file: {rel_path}. It's now at {target_rel_path}, please check and process it."
+        try:
+            notify_result = await _send_message_to_agent(
+                from_agent_id,
+                {"agent_name": target_name, "message": notify_msg, "msg_type": "task_delegate"},
+            )
+            logger.info(f"[A2A-File] Notified {target_name} about file delivery: {notify_result[:100]}")
+        except Exception as notify_err:
+            logger.warning(f"[A2A-File] Failed to notify {target_name}: {notify_err}")
+            notify_result = f"(notification failed: {notify_err})"
+
         return (
             f"✅ File sent to {target_name}.\n"
             f"- Delivered to: {target_rel_path}\n"
-            f"- Inbox note: workspace/inbox/{note_path.name}"
+            f"- {target_name}'s reply: {notify_result}"
         )
     except Exception as e:
         return f"❌ Agent file send error: {str(e)[:200]}"
@@ -4534,16 +4549,9 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 return f"⚠️ {target.name} has no LLM model configured"
 
             # Build target system prompt
-            target_static, target_dynamic = await build_agent_context(target.id, target.name, target.role_description or "")
-            target_dynamic += (
-                "\n\n--- Agent-to-Agent Message ---\n"
-                "You are receiving a message from another digital employee. "
-                "Reply concisely and helpfully. Focus on the request and provide a clear answer.\n"
-                "\n** CRITICAL FILE DELIVERY RULE **\n"
-                "After you write any file (report, document, analysis, etc.) that the requesting agent needs, "
-                "you MUST call `send_file_to_agent(agent_name=\"<requester_name>\", file_path=\"<path>\")` "
-                "to deliver it. The other agent CANNOT access your workspace. "
-                "Never just tell them the path — always deliver explicitly.\n"
+            target_static, target_dynamic = await build_agent_context(
+                target.id, target.name, target.role_description or "",
+                execution_mode="a2a"
             )
 
             # Load recent history for context
@@ -4581,16 +4589,10 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             await db.commit()
 
             # Call target LLM with tool support (multi-round)
-            import asyncio
-            import random
-            import httpx
-            from app.services.llm_utils import (
-                get_provider_base_url,
-                create_llm_client,
-                LLMMessage,
-            )
-            from app.services.llm_client import LLMError
+            from app.services.llm_utils import get_provider_base_url, create_llm_client, LLMMessage
             from app.services.agent_tools import get_agent_tools_for_llm, execute_tool
+            from app.services.agent_runtime import AgentRuntime, RuntimeConfig, default_retryable_check
+
             base_url = get_provider_base_url(target_model.provider, target_model.base_url)
             if not base_url:
                 return f"⚠️ {target.name}'s model has no API base URL configured"
@@ -4598,15 +4600,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             full_msgs: list[LLMMessage] = [LLMMessage(role="system", content=target_static, dynamic_content=target_dynamic)] + [
                 LLMMessage(role=m["role"], content=m["content"]) for m in conversation_messages
             ]
-
-            # Load tools for target agent
             tools_for_llm = await get_agent_tools_for_llm(target.id)
-
-            max_tool_rounds = target.max_tool_rounds or 50
-            target_reply = ""
-            _a2a_accumulated_tokens = 0
-
-            from app.services.token_tracker import record_token_usage, extract_usage_tokens, estimate_tokens_from_chars
 
             llm_client = create_llm_client(
                 provider=target_model.provider,
@@ -4615,133 +4609,64 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 base_url=base_url,
                 timeout=float(getattr(target_model, 'request_timeout', None) or 120.0),
             )
-            _A2A_RETRYABLE_MARKERS = (
-                "http 408", "http 429", "http 500", "http 502", "http 503", "http 504",
-                "timeout", "timed out", "connection failed", "temporarily unavailable", "rate limit",
-            )
-            _A2A_MAX_RETRIES = 3
 
-            def _is_retryable_llm_error(exc: Exception) -> bool:
-                """Determine whether an LLM exception is transient and worth retrying."""
-                if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
-                    return True
-                if isinstance(exc, LLMError):
-                    lowered = (str(exc) or "").lower()
-                    return any(m in lowered for m in _A2A_RETRYABLE_MARKERS)
-                return False
+            async def _a2a_result_filter(tool_name: str, result: str, args: dict) -> str:
+                """Remind the agent to deliver files written during A2A via send_file_to_agent."""
+                if tool_name == "write_file" and result.startswith("✅"):
+                    wrote_path = args.get("path", "")
+                    return result + (
+                        f"\n\n⚠️ REMINDER: The requesting agent ({source_name}) cannot access your workspace. "
+                        f"You MUST now call `send_file_to_agent(agent_name=\"{source_name}\", file_path=\"{wrote_path}\")` "
+                        f"to deliver this file to them."
+                    )
+                return result
+
+            async def _a2a_tool_logger(info: dict) -> None:
+                """Persist A2A tool calls to DB so they appear in chat history."""
+                if info.get("status") != "done":
+                    return
+                try:
+                    async with async_session() as _tc_db:
+                        _tc_db.add(ChatMessage(
+                            agent_id=session_agent_id,
+                            user_id=owner_id,
+                            role="tool_call",
+                            content=json.dumps({
+                                "name": info["name"],
+                                "args": info["args"],
+                                "status": "done",
+                                "result": str(info.get("result", ""))[:500],
+                            }, ensure_ascii=False),
+                            conversation_id=session_id,
+                            participant_id=tgt_participant.id if tgt_participant else None,
+                        ))
+                        await _tc_db.commit()
+                except Exception as _tc_err:
+                    logger.error(f"[A2A] Failed to save tool_call: {_tc_err}")
+
+            a2a_config = RuntimeConfig(
+                agent_id=target.id,
+                user_id=owner_id,
+                session_id=session_id,
+                execution_mode="a2a",
+                max_tool_rounds=target.max_tool_rounds or 50,
+                max_retries=3,
+                retryable_check=default_retryable_check,
+                on_tool_call=_a2a_tool_logger,
+                tool_result_filter=_a2a_result_filter,
+            )
+            a2a_runtime = AgentRuntime(
+                llm_client, tools_for_llm or None, execute_tool, a2a_config,
+                temperature=target_model.temperature,
+                max_tokens=4096,
+            )
 
             try:
-                for _round in range(max_tool_rounds):
-                    response = None
-                    for attempt in range(1, _A2A_MAX_RETRIES + 1):
-                        try:
-                            response = await llm_client.complete(
-                                messages=full_msgs,
-                                tools=tools_for_llm if tools_for_llm else None,
-                                temperature=target_model.temperature,
-                                max_tokens=4096,
-                            )
-                            break
-                        except Exception as llm_exc:
-                            if not _is_retryable_llm_error(llm_exc) or attempt >= _A2A_MAX_RETRIES:
-                                raise
-
-                            err_text = str(llm_exc) or type(llm_exc).__name__
-                            # Exponential backoff with jitter to prevent thundering herd
-                            backoff = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                            logger.warning(
-                                f"[A2A] LLM call failed for {target.name} (round={_round + 1}, "
-                                f"attempt={attempt}/{_A2A_MAX_RETRIES}): {err_text[:200]}. "
-                                f"Retrying in {backoff:.1f}s"
-                            )
-                            await asyncio.sleep(backoff)
-
-                    if response is None:
-                        raise RuntimeError("A2A LLM response is unexpectedly empty after retries")
-
-                    # Track tokens from API response
-                    real_tokens = extract_usage_tokens(response.usage)
-                    if real_tokens:
-                        _a2a_accumulated_tokens += real_tokens
-                    else:
-                        round_chars = sum(len(m.content or '') for m in full_msgs if isinstance(m.content, str))
-                        _a2a_accumulated_tokens += estimate_tokens_from_chars(round_chars)
-
-                    # Check for tool calls
-                    if response.tool_calls:
-                        # Add assistant message with tool calls to conversation
-                        full_msgs.append(LLMMessage(
-                            role="assistant",
-                            content=response.content or None,
-                            tool_calls=[{
-                                "id": tc.get("id", ""),
-                                "type": "function",
-                                "function": tc.get("function", {}),
-                            } for tc in response.tool_calls],
-                            reasoning_content=response.reasoning_content,
-                        ))
-
-                        # Execute each tool call
-                        for tc in response.tool_calls:
-                            fn = tc.get("function", {})
-                            tool_name = fn.get("name", "")
-                            raw_args = fn.get("arguments", "{}")
-                            if isinstance(raw_args, dict):
-                                tool_args = raw_args
-                            else:
-                                try:
-                                    tool_args = json.loads(raw_args) if raw_args else {}
-                                except Exception:
-                                    tool_args = {}
-
-                            tool_result = await execute_tool(tool_name, tool_args, target.id, owner_id)
-
-                            # Nudge: after write_file in A2A, remind to deliver via send_file_to_agent
-                            if tool_name == "write_file" and isinstance(tool_result, str) and tool_result.startswith("\u2705"):
-                                wrote_path = tool_args.get("path", "")
-                                tool_result += (
-                                    f"\n\n⚠️ REMINDER: The requesting agent ({source_name}) cannot access your workspace. "
-                                    f"You MUST now call `send_file_to_agent(agent_name=\"{source_name}\", file_path=\"{wrote_path}\")` "
-                                    f"to deliver this file to them."
-                                )
-
-                            # Save tool_call to DB so it appears in chat history
-                            try:
-                                async with async_session() as _tc_db:
-                                    _tc_db.add(ChatMessage(
-                                        agent_id=session_agent_id,
-                                        user_id=owner_id,
-                                        role="tool_call",
-                                        content=json.dumps({
-                                            "name": tool_name,
-                                            "args": tool_args,
-                                            "status": "done",
-                                            "result": str(tool_result)[:500],
-                                        }, ensure_ascii=False),
-                                        conversation_id=session_id,
-                                        participant_id=tgt_participant.id if tgt_participant else None,
-                                    ))
-                                    await _tc_db.commit()
-                            except Exception as _tc_err:
-                                logger.error(f"[A2A] Failed to save tool_call: {_tc_err}")
-
-                            # Add tool result to conversation
-                            full_msgs.append(LLMMessage(
-                                role="tool",
-                                tool_call_id=tc.get("id", ""),
-                                content=str(tool_result)[:4000],
-                            ))
-                        continue  # Next LLM round
-
-                    # No tool calls — this is the final text response
-                    target_reply = response.content or ""
-                    break
+                a2a_result = await a2a_runtime.run(full_msgs)
             finally:
                 await llm_client.close()
 
-            # Record accumulated A2A tokens for the target agent
-            if _a2a_accumulated_tokens > 0:
-                await record_token_usage(target.id, _a2a_accumulated_tokens)
+            target_reply = a2a_result.content
 
             if not target_reply:
                 return f"⚠️ {target.name} did not respond (LLM returned empty)"

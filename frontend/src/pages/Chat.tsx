@@ -70,9 +70,136 @@ if (typeof document !== 'undefined' && !document.getElementById(PULSE_STYLE_ID))
     document.head.appendChild(s);
 }
 
+/* ── Tool display helpers ── */
+
+const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'delete_file', 'list_files', 'search_files', 'find_files', 'read_document', 'glob_files', 'grep_files']);
+
+function _toolFilePath(tc: ToolCall): string {
+    return tc.args?.path || tc.args?.file_path || '';
+}
+
+function _toolPillLabel(tc: ToolCall): { icon: string; label: string } {
+    const p = _toolFilePath(tc);
+    const short = p.length > 28 ? '…' + p.slice(-25) : p;
+    switch (tc.name) {
+        case 'read_file':      return { icon: '📄', label: short || 'read' };
+        case 'read_document':  return { icon: '📑', label: short || 'read' };
+        case 'write_file':     return { icon: '✏️', label: short || 'write' };
+        case 'edit_file':      return { icon: '🔧', label: short || 'edit' };
+        case 'delete_file':    return { icon: '🗑️', label: short || 'delete' };
+        case 'list_files':     return { icon: '📂', label: short || '/' };
+        case 'search_files':
+        case 'grep_files':     return { icon: '🔍', label: tc.args?.pattern?.slice(0, 20) || 'search' };
+        case 'find_files':
+        case 'glob_files':     return { icon: '🔍', label: tc.args?.glob_pattern?.slice(0, 20) || 'find' };
+        case 'jina_search':
+        case 'web_search':     return { icon: '🌐', label: (tc.args?.query || '').slice(0, 20) || 'search' };
+        case 'jina_read':      return { icon: '🌐', label: 'read url' };
+        default:               return { icon: '⚡', label: tc.name };
+    }
+}
+
+/** Render tool result with specialised cards per tool type */
+function ToolResultView({ tc }: { tc: ToolCall }) {
+    const result = tc.result || '';
+    const isSuccess = result.startsWith('✅');
+    const isError = result.startsWith('❌');
+    const path = _toolFilePath(tc);
+
+    /* ── read_file: code preview ── */
+    if (tc.name === 'read_file' && !isError && result.includes('\n')) {
+        const lines = result.split('\n');
+        const header = lines[0];
+        const body = lines.slice(1).join('\n');
+        return (
+            <div style={{ marginTop: '4px' }}>
+                <div style={{ fontSize: '10px', color: '#818cf8', marginBottom: '3px', fontFamily: 'var(--font-mono)' }}>{header}</div>
+                <pre style={{
+                    fontSize: '10.5px', color: 'var(--text-secondary)',
+                    whiteSpace: 'pre', overflowX: 'auto', overflowY: 'auto',
+                    maxHeight: '220px',
+                    background: 'rgba(0,0,0,0.18)', borderRadius: '6px',
+                    padding: '8px 10px', margin: 0,
+                    fontFamily: 'var(--font-mono)', lineHeight: 1.6,
+                    tabSize: 4,
+                }}>
+                    {body.length > 3000 ? body.slice(0, 3000) + '\n…' : body}
+                </pre>
+            </div>
+        );
+    }
+
+    /* ── write_file / edit_file / delete_file: status badge ── */
+    if (['write_file', 'edit_file', 'delete_file'].includes(tc.name)) {
+        return (
+            <div style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                marginTop: '4px', padding: '5px 8px',
+                background: isSuccess ? 'rgba(34,197,94,0.08)' : isError ? 'rgba(239,68,68,0.08)' : 'rgba(0,0,0,0.06)',
+                borderRadius: '5px', fontSize: '11px',
+                color: isSuccess ? '#22c55e' : isError ? '#ef4444' : 'var(--text-secondary)',
+                fontFamily: 'var(--font-mono)',
+            }}>
+                {result}
+            </div>
+        );
+    }
+
+    /* ── list_files: directory view ── */
+    if (tc.name === 'list_files') {
+        return (
+            <pre style={{
+                fontSize: '10.5px', color: 'var(--text-secondary)',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                maxHeight: '180px', overflowY: 'auto',
+                background: 'rgba(0,0,0,0.10)', borderRadius: '6px',
+                padding: '8px 10px', margin: '4px 0 0 0',
+                fontFamily: 'var(--font-mono)', lineHeight: 1.5,
+            }}>
+                {result}
+            </pre>
+        );
+    }
+
+    /* ── search_files / find_files: code-like results ── */
+    if (['search_files', 'find_files', 'grep_files', 'glob_files'].includes(tc.name)) {
+        return (
+            <pre style={{
+                fontSize: '10px', color: 'var(--text-secondary)',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                maxHeight: '180px', overflowY: 'auto',
+                background: 'rgba(0,0,0,0.12)', borderRadius: '6px',
+                padding: '8px 10px', margin: '4px 0 0 0',
+                fontFamily: 'var(--font-mono)', lineHeight: 1.5,
+            }}>
+                {result.length > 2000 ? result.slice(0, 2000) + '\n…' : result}
+            </pre>
+        );
+    }
+
+    /* ── Default: plain text (current behaviour) ── */
+    return (
+        <div style={{
+            fontSize: '10px', color: 'var(--text-secondary)',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+            maxHeight: '100px', overflowY: 'auto',
+            borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
+            marginTop: '4px',
+        }}>
+            {result.length > 800 ? result.slice(0, 800) + '…' : result}
+        </div>
+    );
+}
+
 function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
     const { t } = useTranslation();
     const [expanded, setExpanded] = useState(false);
+
+    // Auto-expand when a read_file result arrives
+    const hasFileRead = toolCalls.some(tc => tc.name === 'read_file' && tc.result && tc.result.includes('\n'));
+    useEffect(() => {
+        if (hasFileRead) setExpanded(true);
+    }, [hasFileRead]);
     const count = toolCalls.length;
 
     // Find the last tool without a result — that is the currently-executing one.
@@ -105,71 +232,47 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                     color: 'var(--accent-text, #818cf8)',
                 }}
             >
-                {/* Left label: title + running-tool indicator */}
                 <span style={{ flex: 1, textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
                     <span style={{ fontWeight: 500, flexShrink: 0 }}>{t('agent.chat.toolCallChain')}</span>
                     <span style={{ color: 'rgba(99,102,241,0.4)', flexShrink: 0 }}>·</span>
                     {isRunning && activeTool ? (
                         <>
-                            {/* Pulse LED: breathing dot while a tool runs */}
-                            <span
-                                className="cw-running-led"
-                                style={{
-                                    display: 'inline-block',
-                                    width: '6px', height: '6px',
-                                    borderRadius: '50%',
-                                    background: '#818cf8',
-                                    flexShrink: 0,
-                                }}
-                            />
-                            {/* Currently-running tool name */}
+                            <span className="cw-running-led" style={{
+                                display: 'inline-block', width: '6px', height: '6px',
+                                borderRadius: '50%', background: '#818cf8', flexShrink: 0,
+                            }} />
                             <span style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontSize: '11px',
-                                color: '#a5b4fc',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
+                                fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#a5b4fc',
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                             }}>
-                                {activeTool.name}
+                                {_toolPillLabel(activeTool).icon} {_toolPillLabel(activeTool).label}
                             </span>
                         </>
                     ) : (
-                        /* Static green dot when all tools are done */
                         <span style={{
-                            display: 'inline-block',
-                            width: '6px', height: '6px',
-                            borderRadius: '50%',
-                            background: '#22c55e',
-                            flexShrink: 0,
-                            opacity: 0.85,
+                            display: 'inline-block', width: '6px', height: '6px',
+                            borderRadius: '50%', background: '#22c55e', flexShrink: 0, opacity: 0.85,
                         }} />
                     )}
                 </span>
-
-                {/* Count badge */}
                 <span style={{
                     background: 'rgba(99,102,241,0.18)', color: '#818cf8',
                     borderRadius: '10px', padding: '1px 7px',
                     fontSize: '10px', fontWeight: 600, flexShrink: 0,
-                }}>
-                    {count}
-                </span>
-
-                {/* Expand chevron */}
+                }}>{count}</span>
                 <span style={{
                     fontSize: '10px', color: 'var(--text-tertiary)',
                     transition: 'transform 0.2s', display: 'inline-block',
-                    transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-                    flexShrink: 0,
+                    transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', flexShrink: 0,
                 }}>▶</span>
             </button>
 
-            {/* ── Collapsed: pills with individual run-state dots ── */}
+            {/* ── Collapsed: pills with icons + file paths ── */}
             {!expanded && count > 0 && (
                 <div style={{ padding: '0 10px 7px 10px', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                     {toolCalls.map((tc, i) => {
                         const running = !tc.result;
+                        const { icon, label } = _toolPillLabel(tc);
                         return (
                             <span key={i} style={{
                                 background: running ? 'rgba(99,102,241,0.14)' : 'rgba(99,102,241,0.08)',
@@ -177,59 +280,61 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                 borderRadius: '4px', padding: '1px 6px',
                                 fontSize: '10px', color: running ? '#818cf8' : '#a5b4fc',
                                 fontFamily: 'var(--font-mono)',
-                                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                display: 'inline-flex', alignItems: 'center', gap: '3px',
+                                maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                             }}>
                                 {running && (
-                                    <span
-                                        className="cw-running-led"
-                                        style={{
-                                            display: 'inline-block',
-                                            width: '4px', height: '4px',
-                                            borderRadius: '50%',
-                                            background: '#818cf8',
-                                            flexShrink: 0,
-                                        }}
-                                    />
+                                    <span className="cw-running-led" style={{
+                                        display: 'inline-block', width: '4px', height: '4px',
+                                        borderRadius: '50%', background: '#818cf8', flexShrink: 0,
+                                    }} />
                                 )}
-                                {tc.name}
+                                <span style={{ flexShrink: 0 }}>{icon}</span>
+                                {label}
                             </span>
                         );
                     })}
                 </div>
             )}
 
-            {/* ── Expanded: each tool's full detail row ── */}
+            {/* ── Expanded: specialised result cards ── */}
             {expanded && (
                 <div style={{ borderTop: '1px solid rgba(99,102,241,0.15)' }}>
                     {toolCalls.map((tc, i) => {
                         const running = !tc.result;
+                        const { icon } = _toolPillLabel(tc);
+                        const path = _toolFilePath(tc);
                         return (
                             <div key={i} style={{
                                 padding: '7px 10px',
                                 borderBottom: i < toolCalls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
                             }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
-                                    {/* Status dot: amber + pulse = running; green = done */}
-                                    <span
-                                        className={running ? 'cw-running-led' : undefined}
-                                        style={{
-                                            display: 'inline-block',
-                                            width: '5px', height: '5px',
-                                            borderRadius: '50%',
-                                            background: running ? '#f59e0b' : '#22c55e',
-                                            flexShrink: 0,
-                                        }}
-                                    />
+                                {/* Tool header: icon + name + file path */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
+                                    <span className={running ? 'cw-running-led' : undefined} style={{
+                                        display: 'inline-block', width: '5px', height: '5px',
+                                        borderRadius: '50%', background: running ? '#f59e0b' : '#22c55e', flexShrink: 0,
+                                    }} />
+                                    <span style={{ fontSize: '12px', flexShrink: 0 }}>{icon}</span>
                                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600 }}>
                                         {tc.name}
                                     </span>
+                                    {path && (
+                                        <span style={{
+                                            fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-tertiary)',
+                                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                        }}>
+                                            {path}
+                                        </span>
+                                    )}
                                     {running && (
                                         <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
                                             {t('common.loading')}
                                         </span>
                                     )}
                                 </div>
-                                {tc.args && Object.keys(tc.args).length > 0 && (
+                                {/* Args: only for non-file tools or when no path */}
+                                {tc.args && Object.keys(tc.args).length > 0 && !FILE_TOOLS.has(tc.name) && (
                                     <div style={{
                                         fontFamily: 'var(--font-mono)', fontSize: '10px',
                                         color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
@@ -240,16 +345,8 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                         {JSON.stringify(tc.args, null, 2)}
                                     </div>
                                 )}
-                                {tc.result && (
-                                    <div style={{
-                                        fontSize: '10px', color: 'var(--text-secondary)',
-                                        whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                                        maxHeight: '80px', overflowY: 'auto',
-                                        borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
-                                    }}>
-                                        {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
-                                    </div>
-                                )}
+                                {/* Result: specialised per tool type */}
+                                {tc.result && <ToolResultView tc={tc} />}
                             </div>
                         );
                     })}
@@ -713,6 +810,8 @@ export default function Chat() {
                 {/* Wrap chat area in a column so it coexists with the live panel in flex-row */}
                 <div className="chat-main">
                 <div className="chat-messages">
+                    {/* TODO: remove test banner */}
+                    <div style={{ background: 'red', color: 'white', padding: '10px', textAlign: 'center', fontWeight: 'bold' }}>TEST: 新代码已加载</div>
                     {messages.length === 0 && (
                         <div style={{ textAlign: 'center', padding: '60px', color: 'var(--text-tertiary)' }}>
                             <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'center' }}>{Icons.chat}</div>
@@ -731,6 +830,58 @@ export default function Chat() {
                                 {msg.toolCalls && msg.toolCalls.length > 0 && (
                                     <ChatToolChain toolCalls={msg.toolCalls} />
                                 )}
+                                {/* File preview cards — rendered outside tool chain for visibility */}
+                                {(() => { console.warn('🔴 [FilePreview] toolGroup, toolCalls:', msg.toolCalls?.length, msg.toolCalls?.map(tc => `${tc.name}:${tc.result?.slice(0,30)||'no_result'}`)); return null; })()}
+                                {msg.toolCalls?.filter(tc => tc.name === 'read_file' && tc.result && tc.result.includes('\n') && !tc.result.startsWith('❌')).map((tc, fi) => {
+                                    const lines = tc.result!.split('\n');
+                                    const header = lines[0]; // 📄 filepath (lines X-Y of Z)
+                                    const body = lines.slice(1).join('\n');
+                                    const path = _toolFilePath(tc);
+                                    const ext = path.split('.').pop()?.toLowerCase() || '';
+                                    const isMd = ext === 'md';
+                                    return (
+                                        <div key={`fp-${fi}`} style={{
+                                            marginTop: '6px',
+                                            border: '1px solid var(--border-subtle, rgba(99,102,241,0.2))',
+                                            borderRadius: '8px',
+                                            overflow: 'hidden',
+                                            background: 'var(--bg-secondary, rgba(0,0,0,0.03))',
+                                        }}>
+                                            <div style={{
+                                                padding: '6px 12px',
+                                                background: 'rgba(99,102,241,0.06)',
+                                                borderBottom: '1px solid var(--border-subtle, rgba(99,102,241,0.12))',
+                                                display: 'flex', alignItems: 'center', gap: '6px',
+                                                fontSize: '12px', color: '#818cf8', fontFamily: 'var(--font-mono)',
+                                            }}>
+                                                <span>📄</span>
+                                                <span style={{ fontWeight: 600 }}>{path}</span>
+                                                <span style={{ color: 'var(--text-tertiary)', fontSize: '10px', marginLeft: 'auto' }}>
+                                                    {header.match(/\(lines .+\)/)?.[0] || ''}
+                                                </span>
+                                            </div>
+                                            <div style={{
+                                                padding: '10px 12px',
+                                                maxHeight: '300px',
+                                                overflowY: 'auto',
+                                            }}>
+                                                {isMd ? (
+                                                    <MarkdownRenderer content={body.replace(/^\s*\d+\t/gm, '')} />
+                                                ) : (
+                                                    <pre style={{
+                                                        fontSize: '11px', lineHeight: 1.6,
+                                                        fontFamily: 'var(--font-mono)',
+                                                        color: 'var(--text-primary)',
+                                                        margin: 0, whiteSpace: 'pre',
+                                                        overflowX: 'auto', tabSize: 4,
+                                                    }}>
+                                                        {body.length > 5000 ? body.slice(0, 5000) + '\n…' : body}
+                                                    </pre>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
                             </div>
                         ) :
                         <div key={i} className={`chat-message ${msg.role}`}>
@@ -776,6 +927,49 @@ export default function Chat() {
                                 {msg.toolCalls && msg.toolCalls.length > 0 && (
                                     <ChatToolChain toolCalls={msg.toolCalls} />
                                 )}
+                                {/* Inline file preview cards for read_file results */}
+                                {msg.toolCalls?.filter(tc => tc.name === 'read_file' && tc.result && tc.result.includes('\n') && !tc.result.startsWith('❌')).map((tc, fi) => {
+                                    const lines = tc.result!.split('\n');
+                                    const header = lines[0];
+                                    const body = lines.slice(1).join('\n');
+                                    const path = _toolFilePath(tc);
+                                    const ext = path.split('.').pop()?.toLowerCase() || '';
+                                    const isMd = ext === 'md';
+                                    return (
+                                        <div key={`fp-${fi}`} style={{
+                                            marginBottom: '8px',
+                                            border: '1px solid var(--border-subtle, rgba(99,102,241,0.2))',
+                                            borderRadius: '8px', overflow: 'hidden',
+                                            background: 'var(--bg-secondary, rgba(0,0,0,0.03))',
+                                        }}>
+                                            <div style={{
+                                                padding: '6px 12px', background: 'rgba(99,102,241,0.06)',
+                                                borderBottom: '1px solid var(--border-subtle, rgba(99,102,241,0.12))',
+                                                display: 'flex', alignItems: 'center', gap: '6px',
+                                                fontSize: '12px', color: '#818cf8', fontFamily: 'var(--font-mono)',
+                                            }}>
+                                                <span>📄</span>
+                                                <span style={{ fontWeight: 600 }}>{path}</span>
+                                                <span style={{ color: 'var(--text-tertiary)', fontSize: '10px', marginLeft: 'auto' }}>
+                                                    {header.match(/\(lines .+\)/)?.[0] || ''}
+                                                </span>
+                                            </div>
+                                            <div style={{ padding: '10px 12px', maxHeight: '300px', overflowY: 'auto' }}>
+                                                {isMd ? (
+                                                    <MarkdownRenderer content={body.replace(/^\s*\d+\t/gm, '')} />
+                                                ) : (
+                                                    <pre style={{
+                                                        fontSize: '11px', lineHeight: 1.6, fontFamily: 'var(--font-mono)',
+                                                        color: 'var(--text-primary)', margin: 0, whiteSpace: 'pre',
+                                                        overflowX: 'auto', tabSize: 4,
+                                                    }}>
+                                                        {body.length > 5000 ? body.slice(0, 5000) + '\n…' : body}
+                                                    </pre>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
                                 {msg.role === 'assistant' ? (
                                     streaming && !msg.content && i === messages.length - 1 ? (
                                         <div className="thinking-indicator">

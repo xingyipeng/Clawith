@@ -3693,6 +3693,17 @@ function AgentDetailInner() {
                                     </p>
                                     <FileBrowser api={adapter} singleFile="HEARTBEAT.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
                                 </div>
+
+                                {/* Work Instructions Section */}
+                                <div>
+                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        📋 {t('agent.mind.instructionsTitle', 'Work Instructions')}
+                                    </h3>
+                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                                        {t('agent.mind.instructionsDesc', 'Work standards, tech stack, delivery guidelines. Editable anytime.')}
+                                    </p>
+                                    <FileBrowser api={adapter} singleFile="instructions.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
+                                </div>
                             </div>
                         );
                     })()

@@ -509,6 +509,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             user_id=agent.creator_id,
             on_chunk=on_chunk,
             on_tool_call=on_tool_call,
+            execution_mode="trigger",
         )
 
         # Save assistant reply to Reflection session

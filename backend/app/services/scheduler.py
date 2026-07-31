@@ -6,7 +6,6 @@ and executes them by calling the LLM with the schedule's instruction.
 """
 
 import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 
@@ -64,9 +63,10 @@ async def _execute_schedule(schedule_id: uuid.UUID, agent_id: uuid.UUID, instruc
             # Build context and call LLM
             from app.services.agent_context import build_agent_context
             from app.services.agent_tools import execute_tool, get_agent_tools_for_llm
-            from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
+            from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage
+            from app.services.agent_runtime import AgentRuntime, RuntimeConfig
 
-            static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent.name, agent.role_description or "")
+            static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent.name, agent.role_description or "", execution_mode="task")
 
             messages = [
                 LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt),
@@ -89,78 +89,19 @@ async def _execute_schedule(schedule_id: uuid.UUID, agent_id: uuid.UUID, instruc
                 logger.error(f"Schedule {schedule_id}: Failed to create LLM client: {e}")
                 return
 
-            # Tool-calling loop (max 50 rounds for scheduled tasks)
-            reply = ""
-            for round_i in range(50):
-                try:
-                    response = await client.complete(
-                        messages=messages,
-                        tools=tools_for_llm if tools_for_llm else None,
-                        temperature=model.temperature,
-                        max_tokens=get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None)),
-                    )
-                except LLMError as e:
-                    logger.error(f"Schedule {schedule_id}: LLM error: {e}")
-                    reply = f"(LLM 错误: {e})"
-                    break
-                except Exception as e:
-                    logger.error(f"Schedule {schedule_id}: LLM call error: {e}")
-                    reply = f"(LLM 调用异常: {str(e)[:200]})"
-                    break
-
-                if response.tool_calls:
-                    # Add assistant message with tool calls
-                    messages.append(LLMMessage(
-                        role="assistant",
-                        content=response.content or None,
-                        tool_calls=[{
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": tc["function"],
-                        } for tc in response.tool_calls],
-                        reasoning_content=response.reasoning_content,
-                    ))
-
-                    # Tools that require arguments — if LLM sends empty args, skip and ask to retry
-                    _TOOLS_REQUIRING_ARGS = {
-                        "write_file", "read_file", "delete_file", "read_document",
-                        "send_message_to_agent", "send_feishu_message", "send_email",
-                        "web_search", "jina_search", "jina_read",
-                    }
-
-                    for tc in response.tool_calls:
-                        fn = tc["function"]
-                        tool_name = fn["name"]
-                        raw_args = fn.get("arguments", "{}")
-                        logger.info(f"[Scheduler] Raw arguments for {tool_name} (len={len(raw_args) if raw_args else 0}): {repr(raw_args[:300]) if raw_args else 'None'}")
-                        try:
-                            args = json.loads(raw_args) if raw_args else {}
-                        except json.JSONDecodeError as je:
-                            logger.warning(f"[Scheduler] JSON parse failed for {tool_name}: {je}. Raw: {repr(raw_args[:200])}")
-                            args = {}
-
-                        # Guard: if a tool that requires arguments received empty args,
-                        # return an error to LLM instead of executing
-                        if not args and tool_name in _TOOLS_REQUIRING_ARGS:
-                            logger.warning(f"[Scheduler] Empty arguments for {tool_name}, asking LLM to retry")
-                            messages.append(LLMMessage(
-                                role="tool",
-                                tool_call_id=tc["id"],
-                                content=f"Error: {tool_name} was called with empty arguments. You must provide the required parameters. Please retry with the correct arguments.",
-                            ))
-                            continue
-
-                        tool_result = await execute_tool(fn["name"], args, agent_id, agent.creator_id)
-                        messages.append(LLMMessage(
-                            role="tool",
-                            tool_call_id=tc["id"],
-                            content=str(tool_result),
-                        ))
-                else:
-                    reply = response.content or ""
-                    break
-            else:
-                reply = "(已达到最大工具调用轮数)"
+            # Tool-calling loop via AgentRuntime
+            config = RuntimeConfig(
+                agent_id=agent_id,
+                user_id=agent.creator_id,
+                execution_mode="schedule",
+            )
+            runtime = AgentRuntime(
+                client, tools_for_llm or None, execute_tool, config,
+                temperature=model.temperature,
+                max_tokens=get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None)),
+            )
+            runtime_result = await runtime.run(messages)
+            reply = runtime_result.content
 
             await client.close()
 

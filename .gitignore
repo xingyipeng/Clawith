@@ -31,3 +31,8 @@ _agents/
 
 # Internal docs
 docs/
+.idea/
+backend/.idea/
+
+# oh-my-claudecode local state
+.omc/

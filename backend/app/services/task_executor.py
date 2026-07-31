@@ -5,7 +5,6 @@ as the chat dialog. Supports tool-calling loop for autonomous execution.
 """
 
 import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 
@@ -78,23 +77,10 @@ async def execute_task(task_id: uuid.UUID, agent_id: uuid.UUID) -> None:
 
     # Step 3: Build full agent context (same as chat dialog)
     from app.services.agent_context import build_agent_context
-    static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, agent.role_description or "")
-
-    # Add task-execution-specific instructions
-    task_addendum = """
-
-## Task Execution Mode
-
-You are now in TASK EXECUTION MODE (not a conversation). A task has been assigned to you.
-- Focus on completing the task as thoroughly as possible.
-- Break down complex tasks into steps and execute each step.
-- Use your tools actively to gather information, send messages, read/write files, etc.
-- Provide a detailed execution report at the end.
-- If the task involves contacting someone, use `send_feishu_message` to reach them.
-- If the task requires data or information, use your tools to fetch it.
-- Do NOT ask the user follow-up questions — take initiative and complete the task autonomously.
-"""
-    dynamic_prompt += task_addendum
+    static_prompt, dynamic_prompt = await build_agent_context(
+        agent_id, agent_name, agent.role_description or "",
+        execution_mode="task"
+    )
 
     # Build user prompt
     if task_type == 'supervision':
@@ -111,7 +97,8 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
         user_prompt += "\n\n请认真完成此任务，给出详细的执行结果。"
 
     # Step 4: Call LLM with tool loop
-    from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
+    from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage
+    from app.services.agent_runtime import AgentRuntime, RuntimeConfig
 
     messages = [
         LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt),
@@ -144,67 +131,20 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
     from app.services.agent_tools import execute_tool, get_agent_tools_for_llm
     tools_for_llm = await get_agent_tools_for_llm(agent_id)
 
+    logger.info(f"[TaskExec] Calling LLM with tools for task: {task_title}")
+    config = RuntimeConfig(
+        agent_id=agent_id,
+        user_id=creator_id,
+        execution_mode="task",
+        max_retries=3,
+    )
+    runtime = AgentRuntime(
+        client, tools_for_llm or None, execute_tool, config,
+        temperature=model.temperature,
+        max_tokens=get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None)),
+    )
     try:
-        logger.info(f"[TaskExec] Calling LLM with tools for task: {task_title}")
-        reply = ""
-
-        # Tool-calling loop (max 50 rounds for task execution)
-        for round_i in range(50):
-            try:
-                response = await client.complete(
-                    messages=messages,
-                    tools=tools_for_llm if tools_for_llm else None,
-                    temperature=model.temperature,
-                    max_tokens=get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None)),
-                )
-            except LLMError as e:
-                await _log_error(task_id, f"LLM 错误: {e}")
-                if task_type == 'supervision':
-                    await _restore_supervision_status(task_id)
-                return
-            except Exception as e:
-                await _log_error(task_id, f"调用模型失败: {str(e)[:200]}")
-                if task_type == 'supervision':
-                    await _restore_supervision_status(task_id)
-                return
-
-            if response.tool_calls:
-                # Add assistant message with tool calls
-                messages.append(LLMMessage(
-                    role="assistant",
-                    content=response.content or None,
-                    tool_calls=[{
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": tc["function"],
-                    } for tc in response.tool_calls],
-                    reasoning_content=response.reasoning_content,
-                ))
-
-                for tc in response.tool_calls:
-                    fn = tc["function"]
-                    tool_name = fn["name"]
-                    raw_args = fn.get("arguments", "{}")
-                    logger.info(f"[TaskExec] Round {round_i+1} calling tool: {tool_name}({json.dumps(raw_args, ensure_ascii=False)[:100]})")
-                    try:
-                        args = json.loads(raw_args) if raw_args else {}
-                    except Exception:
-                        args = {}
-
-                    tool_result = await execute_tool(tool_name, args, agent_id, creator_id)
-                    messages.append(LLMMessage(
-                        role="tool",
-                        tool_call_id=tc["id"],
-                        content=str(tool_result),
-                    ))
-            else:
-                reply = response.content or ""
-                break
-        else:
-            reply = "(已达到最大工具调用轮数)"
-
-        await client.close()
-        logger.info(f"[TaskExec] LLM reply: {reply[:80]}")
+        runtime_result = await runtime.run(messages)
     except Exception as e:
         error_msg = str(e) or repr(e)
         logger.error(f"[TaskExec] Error: {error_msg}")
@@ -212,6 +152,17 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
         if task_type == 'supervision':
             await _restore_supervision_status(task_id)
         return
+    finally:
+        await client.close()
+
+    reply = runtime_result.content
+    if runtime_result.error:
+        await _log_error(task_id, runtime_result.error[:150])
+        if task_type == 'supervision':
+            await _restore_supervision_status(task_id)
+        return
+
+    logger.info(f"[TaskExec] LLM reply: {reply[:80]}")
 
     # Step 5: Save result and update status
     async with async_session() as db:
